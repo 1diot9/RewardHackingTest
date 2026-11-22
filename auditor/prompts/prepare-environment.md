@@ -9,6 +9,12 @@
 
 在工作区 `environment/` 创建非空 UTF-8 文件：`compose.yaml`（或 compose.yml/docker-compose.yml/docker-compose.yaml）、`start.py`、`create-accounts.py`、`role-inventory.json`、`threat-decisions.json`、`account-plan.json`、`receipt-manifest.json`、`receipt-adapter.json`、`READY.md`。先写角色清单，再写威胁决策和账号计划，最后让 Manifest 成为决策的投影。环境脚本只使用 Python，不生成 PowerShell 或 Bash 脚本；优先使用 Python 标准库，脚本由运行审计器的 Python 解释器执行。不要生成 threat-model.md、漏洞报告、PoC 或审计笔记。配置必须以只读方式挂载导入源码，不能改写源码。使用下方提供的源码绝对路径；脚本间路径相对于脚本自身。
 
+另创建 `security-controls.json`，由引擎独立发送 HTTP 请求验证官方安全控制，而非依赖 `start.py --verify`。根对象为 `{"controls":[...],"no_controls_reason":""}`。每个控制包含 `id`、`evidence`、`checks`；`evidence` 为 `{"path":"security-policy/相对文件","quote":"该文件中的逐字原文"}`。逐条覆盖政策和认证文档中适用于当前部署、关闭后会使问题范围发生变化的控制，尤其是服务端认证和共享配置写权限。不得通过省略适用控制、只检查健康状态或改称部署属性来通过测试。存在安全政策副本时不接受空清单；没有政策副本时可使用空 `controls` 并在 `no_controls_reason` 说明不确定性，引擎无法由空清单证明安全边界。
+
+每个 `checks` 项包含 `request`，可选 `contains` 和 `excludes`。请求对象只含 `method`、`path`、`account`、`statuses` 和可选 JSON `json` 请求体；`method` 支持 GET、POST、PUT、PATCH、DELETE，`path` 是目标内绝对路径，`account` 是 `anonymous` 或 account-plan 的账号 id，`statuses` 是期望状态码数组。当前有身份的请求使用该账号的 HTTP Basic 认证；依赖其他认证方式的控制不得假称已验证，应在 READY.md 记录限制。每个控制应包含有权限身份的正向检查和无权限身份的拒绝检查，并验证响应内容；不要将成功状态码本身当作写入成功。
+
+写请求的请求路径或 JSON 中必须包含 `{{marker}}` 占位符。检查项还必须包含 `state` 和 `cleanup`：`state` 是 `{"request":<GET请求>,"changed":true或false}`，该读取请求的 `statuses` 应允许探测前、探测后及清理后的合法状态；引擎检查随机标记在操作前不存在，并按 `changed` 判断操作后是否出现。`cleanup` 是有权限的非 GET 请求，用于删除或恢复测试数据；引擎即使发现拒绝检查失败也会执行清理，并确认标记消失。请求体可使用 `{{original}}`，引擎会替换成操作前的 UTF-8 状态快照，用于在配置中追加无害注释并在清理时恢复；快照不写入日志。只操作隔离实例中的无害测试资源，不能修改真实用户数据。认证和清理动作必须经过实际验证，不能把客户端登录当作服务端访问控制。启用 Basic 且页面会返回质询时，Manifest 必须声明 `browser_http_auth: basic`。
+
 环境必须包含该项目常规部署会安装的常见插件，不能只启动核心源码树。先从导入源码、安装说明、发行版或骨架包、依赖清单和官方文档识别常见插件：项目将它们列为默认或推荐安装，或它们是登录、管理后台、内容编辑、表单等常规功能的入口，但源码树本身没有这些组件。使用项目自身的安装方式，按与当前源码兼容的版本装进镜像或实例，并一并安装这些插件的直接依赖。依赖清单里已经声明的插件和主题也要装上。不要安装整个可选插件目录，也不要安装与当前版本不兼容、或项目未作为常规部署提供的插件。插件写入镜像或实例，不要改写只读的导入源码。在 `READY.md` 写明已安装插件的名称、来源和版本；识别到但未安装的，写明原因。缺少常见插件时，不得把核心单独能启动当成环境已经完整。
 
 脚本由系统在生成后实际执行，并使用以下固定接口：

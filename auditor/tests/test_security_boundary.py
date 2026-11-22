@@ -4,101 +4,89 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
 
-from app.security_boundary import check_dashy_boundary, is_dashy
-from app.environment_check import check_environment
+from app.security_boundary import BoundaryError, check_browser_auth, execute_boundary_plan, load_boundary_plan
 
 
 class SecurityBoundaryTests(unittest.TestCase):
-    def test_dashy_initialization_requires_browser_basic_declaration(self):
-        from test_environment_test import MANIFEST, prepare
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            environment = prepare(root)
-            (root / 'source' / 'package.json').write_text('{"name":"dashy"}', encoding='utf-8')
-            manifest = {**MANIFEST, 'adapter': 'generic-compose'}
-            (environment / 'receipt-adapter.json').write_text('{"version":2,"target_service":"app","container_port":80}', encoding='utf-8')
-            path = environment / 'receipt-manifest.json'
-            path.write_text(json.dumps(manifest), encoding='utf-8')
-            checks = check_environment(root, require_manifest=True, source_dir=root / 'source')
-            self.assertFalse(next(c for c in checks if c['id'] == 'dashy_browser_auth')['ok'])
-            manifest['browser_http_auth'] = 'basic'
-            path.write_text(json.dumps(manifest), encoding='utf-8')
-            checks = check_environment(root, require_manifest=True, source_dir=root / 'source')
-            self.assertTrue(next(c for c in checks if c['id'] == 'dashy_browser_auth')['ok'])
-
-    def test_real_http_boundary_distinguishes_open_and_secured_servers(self):
+    def test_independent_http_checks_and_cleanup(self):
         class Handler(BaseHTTPRequestHandler):
-            files = {}
-            open_save = False
+            config = 'title: example\n'
+            allow_anonymous = False
+            write_but_reject = False
 
             def log_message(self, *args):
                 pass
 
+            def do_GET(self):
+                if self.path == '/':
+                    self.send_response(401)
+                    self.send_header('WWW-Authenticate', 'Basic realm="test"')
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(self.config.encode())
+
             def do_POST(self):
                 data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                auth = self.headers.get('Authorization', '')
-                allowed = self.open_save or auth == 'Basic YWRtaW46c2VjcmV0'
-                if allowed:
-                    self.files[data['filename']] = data['config']
+                allowed = self.allow_anonymous or self.headers.get('Authorization') == 'Basic YWRtaW46c2VjcmV0'
+                if allowed or self.write_but_reject:
+                    type(self).config = data['config']
                 self.send_response(200 if allowed else 401)
                 self.end_headers()
-
-            def do_GET(self):
-                value = self.files.get(self.path.lstrip('/'))
-                self.send_response(200 if value else 404)
-                self.end_headers()
-                if value:
-                    self.wfile.write(value.encode())
 
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            with tempfile.TemporaryDirectory() as temp:
-                root = Path(temp)
-                (root / 'account-plan.json').write_text('{"accounts":[{"role_id":"admin","account_id":"a"}]}', encoding='utf-8')
-                info = {'base_url': f'http://127.0.0.1:{server.server_port}/', 'accounts': {'a': {'username': 'admin', 'password': 'secret'}}}
-                self.assertTrue(check_dashy_boundary(info, root)['ok'])
-                Handler.open_save = True
-                self.assertFalse(check_dashy_boundary(info, root)['ok'])
+            info = {'base_url': f'http://127.0.0.1:{server.server_port}/', 'accounts': {'admin': {'username': 'admin', 'password': 'secret'}}}
+            read = {'method': 'GET', 'path': '/state', 'account': 'admin', 'statuses': [200]}
+            cleanup = {'method': 'POST', 'path': '/write', 'account': 'admin', 'statuses': [200], 'json': {'config': '{{original}}'}}
+            deny = {'request': {'method': 'POST', 'path': '/write', 'account': 'anonymous', 'statuses': [401], 'json': {'config': '{{original}}# {{marker}}'}},
+                    'state': {'request': read, 'changed': False}, 'cleanup': cleanup}
+            allow = {'request': {**deny['request'], 'account': 'admin', 'statuses': [200]},
+                     'state': {'request': read, 'changed': True}, 'cleanup': cleanup}
+            plan = {'controls': [{'id': 'write', 'checks': [deny, allow]}]}
+            self.assertFalse(check_browser_auth(info, '')['ok'])
+            self.assertTrue(check_browser_auth(info, 'basic')['ok'])
+            self.assertTrue(execute_boundary_plan(plan, info)[0]['ok'])
+            self.assertEqual(Handler.config, 'title: example\n')
+            Handler.allow_anonymous = True
+            self.assertFalse(execute_boundary_plan(plan, info)[0]['ok'])
+            self.assertEqual(Handler.config, 'title: example\n')
+            Handler.allow_anonymous = False
+            Handler.write_but_reject = True
+            self.assertFalse(execute_boundary_plan(plan, info)[0]['ok'])
+            self.assertEqual(Handler.config, 'title: example\n')
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
 
-    def test_dashy_boundary_probes_actual_writes_and_positive_control(self):
+    def test_plan_evidence_and_mutation_requirements(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            (root / 'account-plan.json').write_text(json.dumps({'accounts': [
-                {'role_id': 'admin', 'account_id': 'a'},
-                {'role_id': 'normal', 'account_id': 'n'},
-            ]}), encoding='utf-8')
-            info = {'base_url': 'http://127.0.0.1:1234/', 'accounts': {
-                'a': {'username': 'admin', 'password': 'secret'},
-                'n': {'username': 'normal', 'password': 'secret'},
-            }}
-            def run(open_anonymous=False, open_normal=False, disable_admin=False):
-                files = {}
-                def request(base, path, *, account=None, payload=None):
-                    if payload is None:
-                        content = files.get(path[1:])
-                        return (200, content.encode()) if content else (404, b'')
-                    user = account and account['username']
-                    allowed = (user == 'admin' and not disable_admin) or (user is None and open_anonymous) or (user == 'normal' and open_normal)
-                    if allowed:
-                        files[payload['filename']] = payload['config']
-                    return (200 if allowed else 403), b'{}'
-                with patch('app.security_boundary._request', side_effect=request):
-                    return check_dashy_boundary(info, root)
-            self.assertTrue(run()['ok'])
-            self.assertFalse(run(open_anonymous=True)['ok'])
-            self.assertFalse(run(open_normal=True)['ok'])
-            self.assertFalse(run(disable_admin=True)['ok'])
-
-    def test_other_projects_are_not_guessed_to_be_dashy(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / 'package.json').write_text('{"name":"other"}', encoding='utf-8')
-            self.assertFalse(is_dashy(root))
+            environment = root / 'environment'
+            environment.mkdir()
+            policy = root / 'security-policy'
+            policy.mkdir()
+            (policy / 'security.md').write_text('Writes require authentication.', encoding='utf-8')
+            file = environment / 'security-controls.json'
+            file.write_text('{"controls":[],"no_controls_reason":"optional deployment"}', encoding='utf-8')
+            with self.assertRaises(BoundaryError):
+                load_boundary_plan(root, environment, {'admin'})
+            request = {'method': 'GET', 'path': '/admin', 'account': 'anonymous', 'statuses': [401]}
+            allowed = {'method': 'GET', 'path': '/admin', 'account': 'admin', 'statuses': [200]}
+            plan = {'controls': [{'id': 'auth', 'evidence': {'path': 'security-policy/security.md', 'quote': 'Writes require authentication.'}, 'checks': [{'request': request}, {'request': allowed}]}], 'no_controls_reason': ''}
+            file.write_text(json.dumps(plan), encoding='utf-8')
+            self.assertEqual(len(load_boundary_plan(root, environment, {'admin'})['controls']), 1)
+            plan['controls'][0]['evidence']['quote'] = 'invented'
+            file.write_text(json.dumps(plan), encoding='utf-8')
+            with self.assertRaises(BoundaryError):
+                load_boundary_plan(root, environment, {'admin'})
+            plan['controls'][0]['evidence']['quote'] = 'Writes require authentication.'
+            plan['controls'][0]['checks'][0]['request'] = {'method': 'POST', 'path': '/admin', 'account': 'anonymous', 'statuses': [403]}
+            file.write_text(json.dumps(plan), encoding='utf-8')
+            with self.assertRaises(BoundaryError):
+                load_boundary_plan(root, environment, {'admin'})

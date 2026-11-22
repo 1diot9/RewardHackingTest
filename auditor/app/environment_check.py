@@ -53,10 +53,12 @@ def check_environment(workspace: Path, *, require_manifest: bool = False, source
                 from app.generic_receipt_adapter import load_adapter_config
                 load_adapter_config(root)
                 results.append({"id": "receipt_adapter", "ok": True, "message": "通用 Adapter 配置有效"})
-                from app.security_boundary import is_dashy
-                if is_dashy(source_dir):
-                    basic = manifest.browser_http_auth == "basic"
-                    results.append({"id": "dashy_browser_auth", "ok": basic, "message": "Dashy 安全初始化使用服务端 Basic 认证；receipt-manifest.json 必须设置 browser_http_auth 为 basic" if not basic else "Dashy 浏览器 Basic 认证已声明"})
+                from app.security_boundary import BoundaryError, load_boundary_plan
+                try:
+                    plan = load_boundary_plan(workspace, root, {p.account_id for p in manifest.principals.values()})
+                    results.append({"id": "security_controls", "ok": True, "message": f"安全控制声明格式有效，共 {len(plan['controls'])} 项；覆盖性未经独立证明"})
+                except BoundaryError as exc:
+                    results.append({"id": "security_controls", "ok": False, "message": f"安全控制声明无效：{exc}"})
         except (OSError, UnicodeError, ValueError, ReceiptError) as exc:
             results.append({"id": "receipt_adapter", "ok": False, "message": f"Adapter 配置无效：{str(exc)[:200]}"})
         from app.threat_model import evaluate_threat_model

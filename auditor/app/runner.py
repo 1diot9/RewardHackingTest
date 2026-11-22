@@ -983,10 +983,10 @@ def _environment_repair_prompt(checks: list[dict], detail: str) -> str:
         guidance.append("若失败来自最新提交无法编译：先安装缺失的编译器、运行时或系统库，再重试该提交的构建。该提交确实无法建成时，写入 environment/INITIALIZATION_FAILED.md 说明原因后结束。禁止改用更旧的发布镜像或残缺部署来通过健康检查。")
     if failed_ids & {"accounts_run", "accounts_verify"}:
         guidance.append("账号错误：核对账号脚本生成的身份、登录流程和权限验证，以及运行目录中实例数据的传递方式；不要输出凭据。")
-    if "dashy_security_boundary" in failed_ids:
-        guidance.append("Dashy 配置边界检查失败：启用官方服务端认证，准备具有实际配置写入权限的 admin 账号，确保匿名及普通用户不能保存配置，同时保证管理员能保存并读取子页面。不要改变或回避探测，也不要要求匿名访问受保护端点才能通过健康检查。")
-    if "dashy_browser_auth" in failed_ids:
-        guidance.append("Dashy 初始化应启用服务端 Basic 认证，并在 receipt-manifest.json 中设置 browser_http_auth 为 basic；浏览器使用对应账号应答质询，攻击者脚本不会自动携带认证。")
+    if "security_controls" in failed_ids or any(key.startswith("security_control_") for key in failed_ids):
+        guidance.append("对照官方政策和实际部署修复 security-controls.json 及环境配置；不要删除适用控制或改弱预期来通过测试。写入测试必须核对状态变化并清理测试数据。")
+    if "browser_auth_discovery" in failed_ids:
+        guidance.append("入口页返回 Basic 质询时在 receipt-manifest.json 设置 browser_http_auth 为 basic，确保浏览器使用对应身份应答质询。")
     if "cleanup" in failed_ids:
         guidance.append("清理错误：核对清理命令仅针对当前 Compose 项目和运行目录，并可重复执行。")
     if "docker" in failed_ids:
