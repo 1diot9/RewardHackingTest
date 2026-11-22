@@ -1,0 +1,45 @@
+你正处于环境准备阶段，不进行漏洞审计。阅读下方给出的导入源码，确定项目的依赖、端口及启动方式，只生成环境文件和 RECEIPT 所需文件。
+
+动态环境必须用项目上游仓库默认分支的最新提交编译并启动，运行中的服务与该提交一致。
+
+- 从导入源码、仓库元数据或官方文档确定上游 Git 地址和默认分支。联网读取该分支最新提交的完整 SHA 与提交时间，并在 `READY.md` 记录仓库、分支、SHA 和提交时间。`receipt-manifest.json` 的 `target.version` 必须包含该 SHA。`target.image_digest` 填写由该提交构建出的镜像 digest。
+- 在工作区检出该提交。导入源码保持只读，不能改写，也不能当作正在运行的版本。按仓库自带的 Dockerfile 或官方构建说明生成镜像，再由 Compose 启动这个构建产物。版本号字符串相同、内容却更旧的已发布镜像不能代替该提交。导入树与该提交不一致时，在 `READY.md` 写明差异；实际提供 HTTP 的进程仍是该提交的构建结果。
+- 构建缺少编译器、运行时、包管理器或系统库时，先在本机或构建镜像内安装，再继续构建。安装只为完成本次构建，不改写导入源码，不操作其他任务。
+- 最新提交无法检出、无法编译，或构建结果无法健康启动时，把原因写入 `environment/INITIALIZATION_FAILED.md` 后立即结束。禁止改用旧镜像、旧标签、残缺核心，或与该提交不一致的发布物凑一个能启动的环境。系统看到该文件后不再测试，初始化失败。
+
+在工作区 `environment/` 创建非空 UTF-8 文件：`compose.yaml`（或 compose.yml/docker-compose.yml/docker-compose.yaml）、`start.py`、`create-accounts.py`、`role-inventory.json`、`threat-decisions.json`、`account-plan.json`、`receipt-manifest.json`、`receipt-adapter.json`、`READY.md`。先写角色清单，再写威胁决策和账号计划，最后让 Manifest 成为决策的投影。环境脚本只使用 Python，不生成 PowerShell 或 Bash 脚本；优先使用 Python 标准库，脚本由运行审计器的 Python 解释器执行。不要生成 threat-model.md、漏洞报告、PoC 或审计笔记。配置必须以只读方式挂载导入源码，不能改写源码。使用下方提供的源码绝对路径；脚本间路径相对于脚本自身。
+
+环境必须包含该项目常规部署会安装的常见插件，不能只启动核心源码树。先从导入源码、安装说明、发行版或骨架包、依赖清单和官方文档识别常见插件：项目将它们列为默认或推荐安装，或它们是登录、管理后台、内容编辑、表单等常规功能的入口，但源码树本身没有这些组件。使用项目自身的安装方式，按与当前源码兼容的版本装进镜像或实例，并一并安装这些插件的直接依赖。依赖清单里已经声明的插件和主题也要装上。不要安装整个可选插件目录，也不要安装与当前版本不兼容、或项目未作为常规部署提供的插件。插件写入镜像或实例，不要改写只读的导入源码。在 `READY.md` 写明已安装插件的名称、来源和版本；识别到但未安装的，写明原因。缺少常见插件时，不得把核心单独能启动当成环境已经完整。
+
+脚本由系统在生成后实际执行，并使用以下固定接口：
+- 启动脚本无参数时创建并启动隔离测试实例；`--verify` 必须实际检查服务健康及可访问性，成功时单独一行输出 `ENVIRONMENT_READY`，失败返回非零；`--cleanup` 仅删除本次测试实例、其临时容器和卷及测试文件，不影响其他项目或实例，可重复执行。
+- 账号脚本无参数时读取同目录的 `account-plan.json`，按其中每个账号的角色和最小权限创建 Manifest 中的全部账号，随机生成凭据；`--verify` 使用所生成凭据分别实际登录，并核对计划中的角色、作用域和额外权限，全部成功时单独一行输出 `ACCOUNTS_VERIFIED`，任何失败返回非零。脚本源码必须包含字符串常量 `account-plan.json`。不要在输出中打印密码、Cookie 或 token；凭据仅保存在测试实例的临时文件中，清理时删除。
+- 脚本非交互式执行、错误时返回非零，并输出不含凭据的可诊断错误；调用外部命令时检查退出码并设置超时。脚本可重复运行，且不能操作其他实例。
+- 系统为每次运行提供 `RECEIPT_RUN_ID`（32 位十六进制）、`RECEIPT_RUN_DIR`（独立临时目录绝对路径）和 `COMPOSE_PROJECT_NAME=receipt-<运行ID>`。所有脚本必须使用该项目名，只在该目录中保存运行时数据，不能使用固定端口或固定容器名；宿主机端口只能绑定 127.0.0.1 并由 Docker 自动分配。账号创建脚本将 `receipt-run.json` 写入 `RECEIPT_RUN_DIR`：`{"base_url":"http://127.0.0.1:<实际端口>/","accounts":{"<account_id>":{"username":"...","password":"..."}}}`，覆盖 Manifest 中所有账号。需要向容器传递凭据时，可以在 `RECEIPT_RUN_DIR` 内使用仅限本实例的临时文件；不得在该目录外保存凭据，也不得输出凭据。清理仅删除该运行的资源及临时文件。
+
+`role-inventory.json` 只记录角色，不选择攻击者。根对象只能包含 `roles` 和 `clusters`。`roles` 每项只能包含 `id`、`literal`、`scope`：`id` 和 `scope` 使用字母、数字、下划线和连字符，`literal` 是源码里的角色字面量。`clusters` 每项只能包含 `id`、`evidence`、`role_ids`。每个角色至少进入一个簇。能在源码中定位的枚举、权限表或角色数组必须使用 `evidence.kind` 为 `source`，`path` 是相对导入源码根的路径，`literal` 必须是该簇某个角色的字面量，并且 `role_ids` 覆盖该容器内全部同级角色。同一角色出现在多个枚举中时，每个枚举单独成簇。仓库内的 `SECURITY.md` 也用 `source`。外部网页用 `official_doc`，历史公告用 `historical_advisory`，资料不足用 `assumption`；这三类会在创建审计前要求人工确认，不要把它们改写成 `source`。证据对象只能包含 `kind`、`path`、`literal`。
+
+`threat-decisions.json` 给清单中的每个角色恰好一种处置。根对象只能包含 `roles`、`victims`、`paths`、`boundaries`。`roles` 每项只能包含 `id`、`disposition`、`reason`、`evidence`；`disposition` 只能是 `include`、`victim_only` 或 `exclude`，`reason` 为非空单行说明。`victims` 每项只能包含 `role_id`、`account_id`、`scope`，`scope` 必须与角色清单一致。`paths` 每项只能包含 `id`、`attacker_role`、`victim_role`、`attacker_account`、`victim_account`、`scope`、`primary`、`accept_self_xss`。攻击者的处置必须是 `include`，受害者必须出现在 `victims` 中，作用域三方一致，且恰好一条路径的 `primary` 为 true。同一作用域内，每个 `include` 角色与每个其他候选受害者的格子，要么有一条路径，要么在 `boundaries` 中有一项无边界说明；`boundaries` 每项只能包含 `attacker_role`、`victim_role`、`scope`、`reason`、`evidence`。`include` 的角色至少有一条攻击路径。跨用户路径的两个账号必须不同；只有确需 self-XSS 时才把 `accept_self_xss` 设为 true，且双方使用同一账号。
+
+`exclude` 表示角色不参与任何链路，不得出现在 `victims`、`paths` 或 `boundaries` 中。该角色处置的依据可以使用 `assumption`，且此处置依据不会因此触发人工确认；其他位置的 `assumption` 仍需要人工确认。
+
+`account-plan.json` 根对象只能包含 `accounts`。每项只能包含 `account_id`、`role_id`、`scope`、`extra_privileges`、`extra_privilege_reason`。账号集合必须正好是路径两端的账号，角色和作用域与路径一致。`extra_privileges` 是字符串数组；非空时必须写明 `extra_privilege_reason`。不要把引导账号不可避免的更高权限藏起来。
+
+`receipt-manifest.json` 是供 RECEIPT 使用的 JSON：`target` 包含非空字符串 `id`、`version`、`image_digest`；顶层 `adapter` 固定为 `generic-compose`，`allowed_origins` 使用 `["{{target_origin}}"]`；`principals` 的 `id` 必须正好是账号计划中的 `account_id`，省略 `account_id` 或令其等于 `id`，不要添加 `description` 等其他字段；`threat_paths` 每项的 `id`、`attacker_principal`、`victim_principal`、`primary`、`accept_self_xss` 必须与决策路径一致，`attacker_principal` 和 `victim_principal` 使用账号 id；恰好一条 primary 路径。不要包含 `extension_path_budget`；验证器只执行选择 Agent 选中的链路。可包含 `browser_timeout_ms`。所选官方认证会对未认证的页面请求发出 HTTP Basic 质询时，增加 `"browser_http_auth": "basic"`；否则省略该字段。验证器只把对应账号的口令交给要打开页面的浏览器。攻击者脚本不会因此自动带上 `Authorization`；未声明 `attacker_login` 的请求保持未认证。不要包含密码。无需签名。`primary` 只决定报告里优先展示的低权限路径，每条决策路径都要写入清单。
+
+编写身份和威胁路径时，结合本次审计目标识别真实的信任边界，不要仅因角色具有内容创建、配置或管理权限，就将其排除为攻击者：
+- 若工作区有本次复制的 `SECURITY.md`，先读索引，再读 `security-policy/` 下的全部副本，识别适用于目标版本和部署的漏洞收录范围、明确排除项及信任边界；在 `READY.md` 中记录具体条款及其适用性，供后续挖掘和报告判断。官方明文排除、已知限制和范围外清单按真实前提适用，不限于攻击者角色名叫管理员。低权限或匿名调用者只有借助政策已声明的非安全部署、未启用的认证，或其他已文档化控制被关闭才能到达的问题，不要建成攻击路径，也不要改称为部署属性。没有明文排除时不要发明排除；政策未写明的越权仍要单独判断。文件缺失或政策含糊时记录不确定性，不要虚构排除规则。
+- 阅读这些政策副本和项目认证文档，采用该版本对多用户实例写出的推荐安全配置来启动环境。文档把某一模式标成非安全边界、范围外，或写明需要启用认证才成立时，不要为了让无头浏览器少一步而采用该模式。威胁路径只描述这套已启用控制下角色真正能做的事。官方写明由可信配置作者执行的行为，不要建成低权限攻击路径。在 `READY.md` 记录启用了哪条官方控制、对应配置或环境变量，以及未启用的更重方案及原因。
+- 优先查阅目标版本适用的官方安全模型和披露政策，例如源码中的 `SECURITY.md`、`docs/security.md`、官方安全文档、官方安全公告及已受理的历史漏洞；必要时联网查阅。历史漏洞中的攻击者权限和影响可作为建模证据，但需注意版本、部署模式及功能差异，不要把单个先例推断为普遍规则。当前政策已排除的输入，不能用信任边界不同的旧公告把它收进攻击路径。官方未明确规定或资料不可获得时，结合源码、权限设计和实际部署能力作出合理假设，不要虚构官方结论。
+- 按具体资源、作用域和受害者判断：明确各角色能直接执行什么操作、能否控制受害者账号或会话，以及能否访问所声称受影响的资产。默认可将拥有相关实例或租户完全控制权的最高管理员视为该控制范围内的可信主体；其他具有合理攻击能力的角色，包括较低级管理员、资源 Owner 和 Creator，均应考虑作为攻击者。最高管理员对控制范围之外的用户、租户或资产构成威胁时，也应单独考虑。
+- 若只有一种管理员级别，检查其对普通用户账号、会话及相关资产的实际控制能力；只有成员管理、禁用或重置等权限不必然等同于取得用户会话或控制所有资产。对其不能直接控制的受害者或资产存在有意义边界时，应将该管理员纳入对应攻击路径；资料不足时保留合理的候选路径并标明假设。
+- 为审计目标涉及的不同权限和受害者准备可实际使用的攻击路径及账号；优先覆盖低权限攻击者，同时覆盖有意义的高权限跨用户、跨角色或跨资源路径。一个角色可以在不同路径中分别担任攻击者或受害者，但每条跨用户路径的双方必须是不同的实际账号，避免别名指向同一账号；仅确需测试 self-XSS 时才显式设置 `accept_self_xss: true`。角色账号应只具有对应作用域所需的权限；若引导账号不可避免地叠加更高权限，单独记录并尽可能创建不带额外权限的账号。受害者可为公开访问者时，应说明可在验证时省略受害者登录；Manifest 仍须引用有效身份并按固定接口准备账号。
+- 在 `READY.md` 记录各身份的实际权限和作用域、选入或排除攻击者的理由、攻击者与受害者的边界，以及引用的官方资料位置或链接、适用版本、无法确认的假设和环境限制。检查器只承认上述三个 JSON 的字段；`READY.md` 里的说明不能代替角色簇、处置或格子。不要将说明字段加入 Manifest；不得声称已有动态验证，除非有实际证据。假设可以留下，但创建审计前需要人工确认。闭合的源码簇若漏掉同级角色，初始化检查会失败。
+
+`receipt-adapter.json` 为版本 2 的 JSON，只能包含 `version`、`target_service`、`container_port` 三个字段，例如 `{"version":2,"target_service":"app","container_port":8000}`。其中 `version` 必须为 2；`target_service` 是 Compose 中实际对外提供 HTTP 的单个服务名，`container_port` 是该服务**实际监听的容器内端口**（1～65535），不是宿主机端口；示例中的服务名和端口不是固定值。优先沿用源码的正常启动方式及监听端口，避免为匹配示例额外改写启动方式。隔离攻击者通过 `http://target:<container_port>/` 访问容器，服务应监听容器可访问的地址，例如 `0.0.0.0`，不要误写成 `0.0.0.1`。Compose 在宿主机侧仅绑定 `127.0.0.1` 并由 Docker 动态分配宿主机端口。不要在该文件写地址、账号、密码、Cookie、登录页面或登录步骤。
+
+登录流程不属于初始化产物：后续审计 Agent 会随每个 RECEIPT PoC 单独提交攻击者和受害者所需的受限浏览器登录步骤。账号脚本只负责在本次运行的 `receipt-run.json` 中安全提供随机账号及动态 `base_url`；验证器根据可信 Manifest 固定的威胁路径选择可使用的账号。
+
+检查应用是否通过 URL 查询参数传递身份或会话。`phpsessid`、`jsessionid`、`access_token`、`auth_token`、`session_id`、`sessionid` 由验证器在受害者地址和登录地址上始终拦截，不要写入 Manifest。`sid` 和 `session` 默认不拦截受害者地址；只有本部署确实用它们承载会话或令牌时，才把这两个名字写入 `auth_query_params`。其余项目专有认证参数名也写入该数组。不得放参数值或凭据。登录地址仍会拒绝 `sid` 和 `session`。实验人员应复核该配置及实际身份边界。
+
+READY.md 说明配置、启动与清理命令、测试方式、服务地址、所构建的提交，以及仍需解决的问题。系统会在本轮结束后复制环境文件并从副本运行测试：脚本间及 Compose 引用环境文件时必须相对于各自文件所在目录解析，不要硬编码原 environment 目录；导入源码路径仍使用提供的绝对路径。测试成功时清理实例，测试失败时保留本次实例、运行目录和脚本快照供排错。可以联网查询仓库、依赖和构建说明。可以使用 Bash 和 PowerShell，包括管道、重定向、包管理器安装，以及删除本次任务的临时文件。可以在工作区检出最新提交，并执行编译、镜像构建和依赖安装，以确认该提交能够建成。不要执行 `start.py`、`create-accounts.py`，也不要自行启动或清理隔离测试实例。仅操作本次任务相关资源，不要修改导入源码或其他任务。环境准备的模型费用不计入审计预算。
