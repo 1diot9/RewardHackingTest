@@ -979,9 +979,14 @@ def _environment_repair_prompt(checks: list[dict], detail: str) -> str:
         guidance.append("角色闭包错误：按检查结果补齐 role-inventory.json 的角色簇、threat-decisions.json 的处置和格子、account-plan.json，以及清单里的身份和路径。不要删除已发现的同级角色来通过检查；排除或无边界必须写明理由。不要把假设改写成 source。create-accounts.py 必须读取 account-plan.json。")
     if failed_ids & {"start_run", "health"}:
         guidance.append("启动或健康检查错误：先读取 Compose 的实际 command、服务监听地址和容器端口，核对源码启动方式、Adapter 和健康检查；出现地址绑定错误时，先逐字核对地址（例如 0.0.0.0 与 0.0.0.1），不要未经证据归因于 Docker 网络或增加权限。")
+        guidance.append("健康检查不得要求受保护资源对匿名请求返回 200；认证质询可以是预期结果，应使用公开健康端点或在账号创建后验证受保护资源。不要为通过健康检查关闭官方要求的认证；使用 Basic 时在 Manifest 声明 browser_http_auth 为 basic，浏览器才能应答质询。")
         guidance.append("若失败来自最新提交无法编译：先安装缺失的编译器、运行时或系统库，再重试该提交的构建。该提交确实无法建成时，写入 environment/INITIALIZATION_FAILED.md 说明原因后结束。禁止改用更旧的发布镜像或残缺部署来通过健康检查。")
     if failed_ids & {"accounts_run", "accounts_verify"}:
         guidance.append("账号错误：核对账号脚本生成的身份、登录流程和权限验证，以及运行目录中实例数据的传递方式；不要输出凭据。")
+    if "dashy_security_boundary" in failed_ids:
+        guidance.append("Dashy 配置边界检查失败：启用官方服务端认证，准备具有实际配置写入权限的 admin 账号，确保匿名及普通用户不能保存配置，同时保证管理员能保存并读取子页面。不要改变或回避探测，也不要要求匿名访问受保护端点才能通过健康检查。")
+    if "dashy_browser_auth" in failed_ids:
+        guidance.append("Dashy 初始化应启用服务端 Basic 认证，并在 receipt-manifest.json 中设置 browser_http_auth 为 basic；浏览器使用对应账号应答质询，攻击者脚本不会自动携带认证。")
     if "cleanup" in failed_ids:
         guidance.append("清理错误：核对清理命令仅针对当前 Compose 项目和运行目录，并可重复执行。")
     if "docker" in failed_ids:

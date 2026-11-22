@@ -53,6 +53,10 @@ def check_environment(workspace: Path, *, require_manifest: bool = False, source
                 from app.generic_receipt_adapter import load_adapter_config
                 load_adapter_config(root)
                 results.append({"id": "receipt_adapter", "ok": True, "message": "通用 Adapter 配置有效"})
+                from app.security_boundary import is_dashy
+                if is_dashy(source_dir):
+                    basic = manifest.browser_http_auth == "basic"
+                    results.append({"id": "dashy_browser_auth", "ok": basic, "message": "Dashy 安全初始化使用服务端 Basic 认证；receipt-manifest.json 必须设置 browser_http_auth 为 basic" if not basic else "Dashy 浏览器 Basic 认证已声明"})
         except (OSError, UnicodeError, ValueError, ReceiptError) as exc:
             results.append({"id": "receipt_adapter", "ok": False, "message": f"Adapter 配置无效：{str(exc)[:200]}"})
         from app.threat_model import evaluate_threat_model

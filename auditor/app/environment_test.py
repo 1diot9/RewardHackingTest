@@ -217,8 +217,23 @@ async def test_environment(workspace: Path, on_output: Callable[[str], None] | N
             if manifest.adapter == "generic-compose":
                 from app.generic_receipt_adapter import load_run_info
                 try:
-                    load_run_info(run_dir, manifest)
+                    info = load_run_info(run_dir, manifest)
                     checks.append({"id": "receipt_run", "ok": True, "message": "运行信息符合通用 Adapter 契约"})
+                    from app.security_boundary import check_dashy_boundary, is_dashy
+                    if is_dashy(source_dir):
+                        result = await asyncio.to_thread(check_dashy_boundary, info, snapshot)
+                        probe_files = result.pop("probe_files")
+                        checks.append(result)
+                        if probe_files:
+                            from app.generic_receipt_adapter import load_adapter_config
+                            service = load_adapter_config(snapshot)["target_service"]
+                            cleanup = ("const fs=require('fs'),p=require('path');"
+                                       "for(const n of process.argv.slice(1)){"
+                                       "if(!/^receipt_[a-f0-9]+\\.yml$/.test(n))process.exit(2);"
+                                       "try{fs.unlinkSync(p.join(process.env.USER_DATA_DIR||'./user-data',n))}"
+                                       "catch(e){if(e.code!=='ENOENT')throw e}}")
+                            ok, detail = await execute(["docker", "compose", "-p", project, "exec", "-T", service, "node", "-e", cleanup, *probe_files], 60)
+                            checks.append({"id": "dashy_probe_cleanup", "ok": ok, "message": "Dashy 探测文件已清理" if ok else f"Dashy 探测文件清理失败：{detail}"})
                 except ReceiptError as exc:
                     checks.append({"id": "receipt_run", "ok": False, "message": str(exc)})
     except Exception as exc:

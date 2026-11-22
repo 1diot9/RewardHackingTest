@@ -38,6 +38,32 @@ def prepare(root: Path) -> Path:
 
 
 class EnvironmentTestCases(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_dashy_boundary_removes_probe_before_retaining_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            environment = prepare(root)
+            manifest = {**MANIFEST, 'adapter': 'generic-compose', 'browser_http_auth': 'basic'}
+            (environment / 'receipt-manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+            (environment / 'receipt-adapter.json').write_text('{"version":2,"target_service":"app","container_port":80}', encoding='utf-8')
+            (root / 'source' / 'package.json').write_text('{"name":"dashy"}', encoding='utf-8')
+            commands = []
+            async def run(command, cwd, timeout, env=None, **kwargs):
+                commands.append(command)
+                if '--verify' in command:
+                    return True, 'ACCOUNTS_VERIFIED' if 'create-accounts' in ' '.join(command) else 'ENVIRONMENT_READY'
+                return True, ''
+            result = {'id': 'dashy_security_boundary', 'ok': False, 'message': 'anonymous write', 'probe_files': ['receipt_' + 'a' * 33 + '.yml']}
+            with mock.patch('app.environment_test.check_environment', return_value=[{'id': 'static', 'ok': True}]), \
+                 mock.patch('app.environment_test._run', side_effect=run), \
+                 mock.patch('app.generic_receipt_adapter.load_run_info', return_value={'base_url': 'http://127.0.0.1:1234/', 'accounts': {}}), \
+                 mock.patch('app.security_boundary.check_dashy_boundary', return_value=result):
+                checks = await test_environment(root, source_dir=root / 'source')
+            self.assertFalse(next(c for c in checks if c['id'] == 'dashy_security_boundary')['ok'])
+            self.assertTrue(next(c for c in checks if c['id'] == 'dashy_probe_cleanup')['ok'])
+            cleanup_index = next(i for i, c in enumerate(commands) if 'exec' in c)
+            stop_index = next(i for i, c in enumerate(commands) if 'stop' in c)
+            self.assertLess(cleanup_index, stop_index)
+
     async def test_stop_uses_only_the_task_compose_project(self):
         task = {'workspace': 'workspace', 'environment_run_id': 'a' * 32}
         with mock.patch('app.environment_test._run', new=mock.AsyncMock(return_value=(True, ''))) as run:
