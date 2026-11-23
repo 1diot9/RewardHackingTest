@@ -118,9 +118,9 @@ class EnvironmentTestCases(unittest.IsolatedAsyncioTestCase):
         prompt = runner._environment_repair_prompt([
             {'id': 'threat_coverage', 'ok': False, 'message': '角色簇 base-roles 还缺同级角色：commenter'},
         ], '角色簇 base-roles 还缺同级角色：commenter')
-        self.assertIn('角色闭包错误', prompt)
+        self.assertIn('威胁模型格式或引用错误', prompt)
         self.assertIn('commenter', prompt)
-        self.assertIn('不要删除已发现的同级角色', prompt)
+        self.assertIn('不要依据自动猜测虚构角色', prompt)
 
     def test_repair_feedback_distinguishes_manifest_and_external_docker_errors(self):
         prompt = runner._environment_repair_prompt([

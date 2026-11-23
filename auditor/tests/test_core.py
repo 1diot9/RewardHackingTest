@@ -246,6 +246,10 @@ class CompactionTests(unittest.TestCase):
         for tool in ("WebSearch", "WebFetch", "PowerShell"):
             self.assertNotIn(tool, audit.tools)
             self.assertIn(tool, audit.disallowed_tools)
+        self.assertIn("Agent", setup.tools)
+        self.assertIn("role-cluster-extractor", setup.agents)
+        self.assertEqual(setup.agents["role-cluster-extractor"].tools, ["Read", "Grep", "Glob"])
+        self.assertNotIn("Agent", audit.tools)
         self.assertIn("可以联网搜索", setup.system_prompt)
         self.assertIn("最新提交", setup.system_prompt)
         self.assertIn("联网搜索已经关闭", audit.system_prompt)

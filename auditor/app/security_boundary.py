@@ -64,8 +64,6 @@ def load_boundary_plan(workspace: Path, environment: Path, accounts: set[str]) -
     if not isinstance(reason, str) or (not plan['controls'] and not reason.strip()) or (plan['controls'] and reason):
         raise BoundaryError('空控制清单必须说明原因；非空清单不得填写无控制原因')
     policy_root = workspace / 'security-policy'
-    if not plan['controls'] and policy_root.is_dir() and any(p.is_file() for p in policy_root.rglob('*')):
-        raise BoundaryError('存在安全政策副本但控制清单为空，无法证明适用控制已验证')
     ids: set[str] = set()
     for control in plan['controls']:
         if not isinstance(control, dict) or set(control) != {'id', 'evidence', 'checks'}:
@@ -159,8 +157,10 @@ def _request(base: str, spec: dict, accounts: dict, marker: str, original: str =
 
 def _expect(spec: dict, result: tuple[int, bytes, dict]) -> bytes:
     status, body, _ = result
-    if status not in spec['statuses'] or len(body) > 262144:
-        raise BoundaryError(f'预期状态 {spec["statuses"]}，实际 {status}，或响应过大')
+    if len(body) > 262144:
+        raise BoundaryError(f'响应超过 262144 字节（状态 {status}）')
+    if status not in spec['statuses']:
+        raise BoundaryError(f'预期状态 {spec["statuses"]}，实际 {status}（响应 {len(body)} 字节）')
     return body
 
 
@@ -169,8 +169,11 @@ def execute_boundary_plan(plan: dict, info: dict) -> list[dict]:
     checks = []
     for control in plan['controls']:
         try:
-            for case in control['checks']:
-                _execute_check(base, accounts, case)
+            for index, case in enumerate(control['checks'], 1):
+                try:
+                    _execute_check(base, accounts, case)
+                except BoundaryError as exc:
+                    raise BoundaryError(f'第 {index} 项：{exc}') from exc
             checks.append({'id': 'security_control_' + control['id'], 'ok': True, 'message': f"安全控制 {control['id']}：动态检查通过"})
         except (BoundaryError, KeyError, TypeError, ValueError) as exc:
             checks.append({'id': 'security_control_' + control['id'], 'ok': False, 'message': f"安全控制 {control['id']} 未通过：{exc}"})
@@ -199,28 +202,45 @@ def _execute_check(base: str, accounts: dict, case: dict) -> None:
     state = case.get('state')
     attempted = False
     original = ''
+    def probe(stage: str, spec: dict, snapshot: str = '') -> bytes:
+        try:
+            return _expect(spec, _request(base, spec, accounts, marker, snapshot))
+        except BoundaryError as exc:
+            path = urlsplit(spec['path']).path
+            raise BoundaryError(f'{stage} {spec["method"]} {path}（账号 {spec["account"]}）：{exc}') from exc
+
     if state:
-        before = _expect(state['request'], _request(base, state['request'], accounts, marker))
+        before = probe('操作前状态读取', state['request'])
         if token in before:
             raise BoundaryError('探测前随机标记已存在')
         try:
             original = before.decode('utf-8')
         except UnicodeError as exc:
             raise BoundaryError('状态快照不是 UTF-8，无法安全恢复') from exc
+    failure = None
     try:
         attempted = True
-        body = _expect(request, _request(base, request, accounts, marker, original))
+        body = probe('主请求', request, original)
         if 'contains' in case and str(_render(case['contains'], marker)).encode() not in body:
             raise BoundaryError('响应缺少预期内容')
         if 'excludes' in case and str(_render(case['excludes'], marker)).encode() in body:
             raise BoundaryError('响应包含不应出现的内容')
         if state:
-            after = _expect(state['request'], _request(base, state['request'], accounts, marker))
+            after = probe('操作后状态读取', state['request'])
             if (token in after) != state['changed']:
                 raise BoundaryError('写入后的状态与预期不符')
+    except BoundaryError as exc:
+        failure = exc
     finally:
         if state and attempted:
-            _expect(case['cleanup'], _request(base, case['cleanup'], accounts, marker, original))
-            cleaned = _expect(state['request'], _request(base, state['request'], accounts, marker))
-            if cleaned != before:
-                raise BoundaryError('清理后状态与操作前不一致')
+            try:
+                probe('清理请求', case['cleanup'], original)
+                cleaned = probe('清理后状态读取', state['request'])
+                if cleaned != before:
+                    raise BoundaryError('清理后状态与操作前不一致')
+            except BoundaryError as exc:
+                if failure:
+                    raise BoundaryError(f'{failure}；清理也失败：{exc}') from exc
+                raise
+    if failure:
+        raise failure

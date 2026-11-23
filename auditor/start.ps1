@@ -39,7 +39,7 @@ function Wait-PortOpen {
     return $false
 }
 
-python -c "import fastapi, uvicorn, claude_agent_sdk, yaml" 2>$null
+python -c "import fastapi, uvicorn, claude_agent_sdk, yaml, tree_sitter, tree_sitter_go" 2>$null
 if ($LASTEXITCODE -ne 0) {
     python -m pip install -r (Join-Path $PSScriptRoot "requirements.txt")
     if ($LASTEXITCODE -ne 0) {

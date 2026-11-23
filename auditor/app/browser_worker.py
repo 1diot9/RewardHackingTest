@@ -10,11 +10,16 @@ from app.process_bounds import RESULT_FILE_ENV, STEP_PREFIX_ENV, StepTimeout, ma
 
 
 def _write(payload: dict[str, Any]) -> None:
+    """先写临时文件再替换，父进程不会读到半截 JSON。关闭浏览器之前就可以调用。"""
     path = os.environ.get(RESULT_FILE_ENV)
     if not path:
         return
-    with open(path, "w", encoding="utf-8") as handle:
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(payload, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
 
 
 def _attacker(job: dict[str, Any]) -> dict[str, Any]:
@@ -35,6 +40,7 @@ def _attacker(job: dict[str, Any]) -> dict[str, Any]:
             int(job["timeout_ms"]),
             headers,
             job.get("http_credentials"),
+            settle=_write,
         )
     except AttackerAuthMissing:
         return {"kind": "error", "error": "AttackerAuthMissing"}
@@ -72,7 +78,7 @@ def _victim(job: dict[str, Any]) -> dict[str, Any]:
             return False
         if not steps:
             return True
-        return _login(page, job["base_url"], steps, account)
+        return _login(page, job["base_url"], steps, account, timeout_ms=int(job["timeout_ms"]))
 
     target = TargetRun(
         run_id=job.get("run_id") or "",
@@ -86,7 +92,16 @@ def _victim(job: dict[str, Any]) -> dict[str, Any]:
         victim_http_credentials=job.get("http_credentials"),
         victim_account=account or None,
     )
-    evidence = PlaywrightVictimDriver().run(candidate, target, path, job["token"], int(job["timeout_ms"]))
+    def publish(evidence: Any) -> None:
+        _write(_evidence_payload(evidence))
+
+    evidence = PlaywrightVictimDriver().run(
+        candidate, target, path, job["token"], int(job["timeout_ms"]), settle=publish,
+    )
+    return _evidence_payload(evidence)
+
+
+def _evidence_payload(evidence: Any) -> dict[str, Any]:
     return {
         "kind": "evidence",
         "accepted": evidence.accepted,

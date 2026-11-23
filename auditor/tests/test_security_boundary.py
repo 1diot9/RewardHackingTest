@@ -2,6 +2,7 @@ import json
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -9,6 +10,22 @@ from app.security_boundary import BoundaryError, check_browser_auth, execute_bou
 
 
 class SecurityBoundaryTests(unittest.TestCase):
+    def test_primary_and_cleanup_errors_are_both_reported_without_response_body(self):
+        info = {'base_url': 'http://127.0.0.1:1234/', 'accounts': {}}
+        read = {'method': 'GET', 'path': '/state', 'account': 'anonymous', 'statuses': [200]}
+        case = {'request': {'method': 'POST', 'path': '/write', 'account': 'anonymous', 'statuses': [201]},
+                'state': {'request': read, 'changed': True},
+                'cleanup': {'method': 'DELETE', 'path': '/cleanup', 'account': 'anonymous', 'statuses': [204]}}
+        plan = {'controls': [{'id': 'write', 'checks': [case]}]}
+        with mock.patch('app.security_boundary._request', side_effect=[(200, b'initial', {}), (422, b'secret', {}), (401, b'secret', {})]):
+            result = execute_boundary_plan(plan, info)[0]
+        self.assertFalse(result['ok'])
+        self.assertIn('主请求 POST /write', result['message'])
+        self.assertIn('实际 422', result['message'])
+        self.assertIn('清理请求 DELETE /cleanup', result['message'])
+        self.assertIn('实际 401', result['message'])
+        self.assertNotIn('secret', result['message'])
+
     def test_independent_http_checks_and_cleanup(self):
         class Handler(BaseHTTPRequestHandler):
             config = 'title: example\n'
@@ -74,8 +91,7 @@ class SecurityBoundaryTests(unittest.TestCase):
             (policy / 'security.md').write_text('Writes require authentication.', encoding='utf-8')
             file = environment / 'security-controls.json'
             file.write_text('{"controls":[],"no_controls_reason":"optional deployment"}', encoding='utf-8')
-            with self.assertRaises(BoundaryError):
-                load_boundary_plan(root, environment, {'admin'})
+            self.assertEqual(load_boundary_plan(root, environment, {'admin'})['controls'], [])
             request = {'method': 'GET', 'path': '/admin', 'account': 'anonymous', 'statuses': [401]}
             allowed = {'method': 'GET', 'path': '/admin', 'account': 'admin', 'statuses': [200]}
             plan = {'controls': [{'id': 'auth', 'evidence': {'path': 'security-policy/security.md', 'quote': 'Writes require authentication.'}, 'checks': [{'request': request}, {'request': allowed}]}], 'no_controls_reason': ''}

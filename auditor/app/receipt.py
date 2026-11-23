@@ -869,6 +869,30 @@ class DockerAttackerExecutor:
         return True, "ATTACKER_COMPLETED"
 
 
+_SELECTOR_TIMEOUT_KINDS = frozenset({"goto", "fill", "click", "assert_visible", "select", "scroll"})
+
+
+def _selector_timeout_blocker(step: str) -> str:
+    """登录或受害者动作的选择器超时属于候选项，启动和关闭超时不是。"""
+    stage, separator, kind = step.partition(".")
+    if separator and stage in _CANDIDATE_BROWSER_STAGES and kind in _SELECTOR_TIMEOUT_KINDS:
+        return "not_found"
+    return ""
+
+
+def _evidence_for_step_timeout(
+    exc: StepTimeout,
+    trace: tuple[str, ...] | list[str],
+    navigation_status: int | None,
+) -> BrowserEvidence:
+    stage = exc.step.split(".", 1)[0]
+    return BrowserEvidence(
+        False, "BROWSER_ERROR", "", tuple(trace), stage, "playwright_timeout",
+        exc.index if stage == "victim_action" else None, navigation_status,
+        _selector_timeout_blocker(exc.step), exc.step, exc.index,
+    )
+
+
 def _click_blocker(message: str) -> str:
     """把点击失败收成固定类别。异常原文、选择器和页面片段不进入结果。"""
     if "strict mode violation" in message:
@@ -887,7 +911,7 @@ def _evidence_from_worker(result: dict[str, Any], *, run_id: str = "") -> Browse
         stage = step.split(".", 1)[0]
         return BrowserEvidence(
             False, "BROWSER_ERROR", "", (), stage, "playwright_timeout",
-            index if stage == "victim_action" else None, None, "", step, index,
+            index if stage == "victim_action" else None, None, _selector_timeout_blocker(step), step, index,
         )
     if result.get("error") == "CANDIDATE_INVALID":
         diagnostics.record("candidate_revalidation", run_id=run_id, error="CANDIDATE_INVALID")
@@ -999,6 +1023,8 @@ class PlaywrightVictimDriver:
         path: ThreatPath,
         token: str,
         timeout_ms: int,
+        *,
+        settle: Callable[[BrowserEvidence], None] | None = None,
     ) -> BrowserEvidence:
         if not browser_runs_inprocess():
             return _victim_browser_bounded(candidate, target, path, token, timeout_ms)
@@ -1019,9 +1045,74 @@ class PlaywrightVictimDriver:
         action_index: int | None = None
         navigation_status: int | None = None
         outcome: BrowserEvidence | None = None
+        published = False
+
+        def publish(evidence: BrowserEvidence) -> None:
+            nonlocal published
+            if published:
+                return
+            published = True
+            if settle is None:
+                return
+            try:
+                settle(evidence)
+            except Exception:
+                return
+
+        def evidence_from_exception(exc: Exception) -> BrowserEvidence:
+            # 异常消息可能包含 token、凭据、URL 或攻击者控制的内容，不写入结果。
+            if isinstance(exc, PlaywrightTimeoutError):
+                error_type = "playwright_timeout"
+            elif isinstance(exc, PlaywrightError):
+                error_type = "playwright_error"
+            elif isinstance(exc, ReceiptError):
+                error_type = "receipt_error"
+            elif isinstance(exc, OSError):
+                error_type = "os_error"
+            else:
+                error_type = "unexpected_error"
+            blocker = _click_blocker(str(exc)) if error_type == "playwright_timeout" else ""
+            if "strict mode violation" in str(exc):
+                blocker = "ambiguous"
+            error_step = f"victim_action.{trace[-1]}" if stage == "victim_action" and trace else stage
+            return BrowserEvidence(
+                False, "BROWSER_ERROR", "", tuple(trace), stage, error_type, action_index, navigation_status, blocker,
+                error_step, action_index,
+            )
+
         try:
             mark_step(stage)
-            with sync_playwright() as playwright:
+
+            def finish(exc_type: type[BaseException] | None, exc: BaseException | None) -> None:
+                nonlocal outcome
+                if outcome is None and isinstance(exc, StepTimeout):
+                    diagnostics.record("victim_browser", run_id=target.run_id, error=f"{type(exc).__name__}: {exc.step}", browser_stage=stage, step=exc.step)
+                    outcome = _evidence_for_step_timeout(exc, trace, navigation_status)
+                elif outcome is None and exc is not None:
+                    diagnostics.record("victim_browser", run_id=target.run_id, error=f"{type(exc).__name__}: {exc}", browser_stage=stage, action_index=action_index)
+                    outcome = evidence_from_exception(exc)
+                if outcome is None:
+                    outcome = BrowserEvidence(
+                        False, "BROWSER_ERROR", "", tuple(trace), stage, "unexpected_error", action_index, navigation_status,
+                    )
+                publish(outcome)
+
+            class _PublishBeforeStop:
+                """先把结论交给父进程，再停止 Playwright。停止卡住时父进程仍能读到结论。"""
+
+                def __enter__(self) -> Any:
+                    self._manager = sync_playwright()
+                    return self._manager.__enter__()
+
+                def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: Any) -> bool:
+                    finish(exc_type, exc)
+                    try:
+                        self._manager.__exit__(exc_type, exc, tb)
+                    except Exception:
+                        return True
+                    return True
+
+            with _PublishBeforeStop() as playwright:
                 stage = "browser_launch"
                 mark_step(stage)
                 browser = playwright.chromium.launch(**_chromium_launch_options(playwright.chromium.executable_path))
@@ -1062,9 +1153,10 @@ class PlaywrightVictimDriver:
                 mark_step(stage)
                 session_before = None
                 if candidate.victim_login and not target.login_victim(page, path.victim_principal, candidate.victim_login):
+                    outcome = BrowserEvidence(False, "VICTIM_LOGIN_FAILED")
+                    publish(outcome)
                     stage = "browser_close"
                     _close_browser(browser)
-                    outcome = BrowserEvidence(False, "VICTIM_LOGIN_FAILED")
                 else:
                     if candidate.victim_login:
                         stage = "victim_identity"
@@ -1093,52 +1185,32 @@ class PlaywrightVictimDriver:
                         mark_step(stage)
                         identity_changed = _session_identity_changed(session_before, _session_cookies(context))
                     if identity_changed:
+                        outcome = BrowserEvidence(False, "VICTIM_IDENTITY_CHANGED", "", tuple(trace), navigation_status=navigation_status)
+                        publish(outcome)
                         stage = "browser_close"
                         _close_browser(browser)
-                        outcome = BrowserEvidence(False, "VICTIM_IDENTITY_CHANGED", "", tuple(trace), navigation_status=navigation_status)
                     else:
                         stage = "receipt_wait"
                         mark_step(stage)
                         _wait_for_receipt(page, hit, timeout_ms)
                         origin = hit.get("url", "") if hit else ""
-                        stage = "browser_close"
-                        mark_step(stage)
-                        _close_browser(browser)
                         if hit:
                             outcome = BrowserEvidence(True, "BROWSER_BOUND_RECEIPT", origin, tuple(trace))
                         else:
                             outcome = BrowserEvidence(False, "NO_BROWSER_BOUND_RECEIPT", "", tuple(trace), navigation_status=navigation_status)
-        except StepTimeout as exc:
-            if outcome is not None:
-                return outcome
-            diagnostics.record("victim_browser", run_id=target.run_id, error=f"{type(exc).__name__}: {exc.step}", browser_stage=stage, step=exc.step)
-            return BrowserEvidence(
-                False, "BROWSER_ERROR", "", tuple(trace), "victim_login", "playwright_timeout",
-                exc.index, navigation_status, "", exc.step, exc.index,
-            )
+                        publish(outcome)
+                        stage = "browser_close"
+                        mark_step(stage)
+                        _close_browser(browser)
         except Exception as exc:
             if outcome is not None:
                 return outcome
             diagnostics.record("victim_browser", run_id=target.run_id, error=f"{type(exc).__name__}: {exc}", browser_stage=stage, action_index=action_index)
-            # 异常消息可能包含 token、凭据、URL 或攻击者控制的内容，不写入结果。
-            if isinstance(exc, PlaywrightTimeoutError):
-                error_type = "playwright_timeout"
-            elif isinstance(exc, PlaywrightError):
-                error_type = "playwright_error"
-            elif isinstance(exc, ReceiptError):
-                error_type = "receipt_error"
-            elif isinstance(exc, OSError):
-                error_type = "os_error"
+            if isinstance(exc, StepTimeout):
+                outcome = _evidence_for_step_timeout(exc, trace, navigation_status)
             else:
-                error_type = "unexpected_error"
-            blocker = _click_blocker(str(exc)) if error_type == "playwright_timeout" else ""
-            if "strict mode violation" in str(exc):
-                blocker = "ambiguous"
-            error_step = f"victim_action.{trace[-1]}" if stage == "victim_action" and trace else stage
-            return BrowserEvidence(
-                False, "BROWSER_ERROR", "", tuple(trace), stage, error_type, action_index, navigation_status, blocker,
-                error_step, action_index,
-            )
+                outcome = evidence_from_exception(exc)
+            publish(outcome)
         return outcome if outcome is not None else BrowserEvidence(False, "BROWSER_ERROR", "", tuple(trace), stage, "unexpected_error", action_index, navigation_status)
 
 
@@ -1499,7 +1571,7 @@ def _playwright_action(page: Any, action: VictimAction, token: str, trace: list[
     if action.type == "wait":
         page.wait_for_timeout(action.milliseconds)
     elif action.type == "click":
-        page.locator(action.selector).click()
+        page.locator(action.selector).click(no_wait_after=True)
     elif action.type == "fill":
         page.locator(action.selector).fill(_render_template(action.value, token))
     elif action.type == "select":

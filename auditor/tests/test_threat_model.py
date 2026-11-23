@@ -140,8 +140,8 @@ class ThreatModelTests(unittest.TestCase):
             )
             self._write_base_model(environment, include_commenter=False)
             blocked = evaluate_threat_model(environment, source)
-            self.assertFalse(blocked.ok)
-            self.assertTrue(any("commenter" in message for message in blocked.messages), blocked.messages)
+            self.assertTrue(blocked.ok, blocked.messages)
+            self.assertTrue(any("commenter" in item["message"] for item in blocked.review_items), blocked.review_items)
 
             self._write_base_model(environment, include_commenter=True)
             closed = evaluate_threat_model(environment, source)
@@ -168,6 +168,23 @@ class ThreatModelTests(unittest.TestCase):
             self.assertTrue(unparsed.ok, unparsed.messages)
             self.assertEqual(unparsed.coverage_status, "review_required")
             self.assertTrue(any(item["code"] == "unparsed" for item in unparsed.review_items))
+
+    def test_go_function_arguments_do_not_block_initialization(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            environment, source = root / "environment", root / "source"
+            manifest = write_closed_model(environment, source)
+            _write(environment / "receipt-manifest.json", manifest)
+            (source / "roles.go").write_text('package p\nconst (\n a = iota\n b\n)\nfunc search(ctx int) { call(ctx, a) }\n', encoding="utf-8")
+            inventory = json.loads((environment / "role-inventory.json").read_text(encoding="utf-8"))
+            inventory["clusters"][0]["evidence"]["path"] = "roles.go"
+            _write(environment / "role-inventory.json", inventory)
+            report = evaluate_threat_model(environment, source)
+            self.assertTrue(report.ok, report.messages)
+            self.assertFalse(any("ctx" in item["message"] for item in report.review_items))
+            from app.threat_model import _go_const_groups
+            groups = _go_const_groups((source / "roles.go").read_text(encoding="utf-8"))
+            self.assertEqual([group.roles for group in groups], [{"a", "b"}])
 
     def test_manifest_drift_same_account_and_budget_are_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -337,8 +354,8 @@ class ThreatModelTests(unittest.TestCase):
             environment, source = root / "environment", root / "source"
             self._write_literal_cluster(environment, source, 'const roles = { owner: 0, editor?: 2, viewer: 4 };\n', ["owner", "viewer"])
             optional = evaluate_threat_model(environment, source)
-            self.assertFalse(optional.ok)
-            self.assertTrue(any("editor" in message for message in optional.messages), optional.messages)
+            self.assertTrue(optional.ok, optional.messages)
+            self.assertTrue(any("editor" in item["message"] for item in optional.review_items), optional.review_items)
 
             self._write_literal_cluster(
                 environment,
@@ -347,8 +364,8 @@ class ThreatModelTests(unittest.TestCase):
                 ["owner", "editor"],
             )
             valued = evaluate_threat_model(environment, source)
-            self.assertFalse(valued.ok)
-            self.assertTrue(any("administrator" in message for message in valued.messages), valued.messages)
+            self.assertTrue(valued.ok, valued.messages)
+            self.assertTrue(any("administrator" in item["message"] for item in valued.review_items), valued.review_items)
 
             self._write_literal_cluster(environment, source, 'const roles = ["Super Users", "editor", "author"];\n', ["editor", "author"])
             opaque = evaluate_threat_model(environment, source)

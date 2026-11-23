@@ -43,6 +43,29 @@ class ProcessBoundTests(unittest.TestCase):
             self.assertEqual(outcome["index"], 2)
             self.assertIsNotNone(proc.poll())
 
+    def test_written_result_returns_while_the_process_is_still_busy(self) -> None:
+        script = (
+            "import json,sys,time; "
+            "json.dump({'step':'victim_login.assert_visible','index':4,'started':time.time()}, open(sys.argv[1],'w')); "
+            "json.dump({'kind':'evidence','click_blocker':'not_found'}, open(sys.argv[2],'w')); "
+            "time.sleep(30)"
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            step_file = Path(raw) / "step.json"
+            result_file = Path(raw) / "result.json"
+            proc = subprocess.Popen([sys.executable, "-c", script, str(step_file), str(result_file)])
+            started = time.monotonic()
+            try:
+                outcome = supervise(proc, step_file, 30, result_file)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            self.assertLess(time.monotonic() - started, 8)
+            self.assertFalse(outcome["timeout"])
+            self.assertEqual(outcome["result"]["click_blocker"], "not_found")
+            self.assertIsNotNone(proc.poll())
+
     def test_feedback_includes_login_and_browser_steps(self) -> None:
         attacker = ReceiptResult(
             "c", "m",

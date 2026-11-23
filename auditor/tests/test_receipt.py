@@ -194,7 +194,7 @@ class PlaywrightDiagnosticsTests(unittest.TestCase):
                     def set_default_timeout(self, *args): pass
                     def goto(self, *args, **kwargs): fail_at("victim_navigation")
                     def locator(self, *args): return self
-                    def click(self): fail_at("victim_action")
+                    def click(self, **kwargs: object): fail_at("victim_action")
 
                 class Context:
                     def route(self, *args): pass
@@ -260,7 +260,7 @@ class PlaywrightDiagnosticsTests(unittest.TestCase):
             def locator(self, *args):
                 return self
 
-            def click(self) -> None:
+            def click(self, **kwargs: object) -> None:
                 pass
 
             def wait_for_timeout(self, *args) -> None:
@@ -317,6 +317,90 @@ class PlaywrightDiagnosticsTests(unittest.TestCase):
                 evidence = PlaywrightVictimDriver().run(_candidate(), target, manifest.primary_path, secret, 1000)
         self.assertTrue(evidence.accepted)
         self.assertEqual(evidence.reason, "BROWSER_BOUND_RECEIPT")
+
+    def test_login_timeout_is_settled_before_playwright_stops(self) -> None:
+        from app.process_bounds import StepTimeout
+        from app.receipt import LoginStep
+
+        order: list[str] = []
+
+        class FakeTimeout(Exception):
+            pass
+
+        class Browser:
+            def new_context(self):
+                return Context()
+
+            def close(self) -> None:
+                pass
+
+        class Context:
+            def route(self, *args) -> None:
+                pass
+
+            def route_web_socket(self, *args) -> None:
+                pass
+
+            def expose_binding(self, *args) -> None:
+                pass
+
+            def add_init_script(self, *args) -> None:
+                pass
+
+            def new_page(self):
+                return Page()
+
+        class Page:
+            url = "http://target.test/login"
+
+            def set_default_timeout(self, *args) -> None:
+                pass
+
+        class Chromium:
+            executable_path = "chromium"
+
+            def launch(self, **kwargs):
+                return Browser()
+
+        class Playwright:
+            chromium = Chromium()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args) -> None:
+                order.append("stop")
+                raise RuntimeError("stop hung")
+
+        api = types.ModuleType("playwright.sync_api")
+        api.sync_playwright = Playwright
+        api.Error = FakeTimeout
+        api.TimeoutError = FakeTimeout
+        package = types.ModuleType("playwright")
+        package.sync_api = api
+        candidate = replace(_candidate(), victim_login=(LoginStep("assert_visible", selector="#done"),))
+        manifest = _manifest(extension_path_budget=0)
+
+        def settle(evidence: BrowserEvidence) -> None:
+            order.append("settle")
+            self.assertEqual(evidence.click_blocker, "not_found")
+
+        def login_victim(*args):
+            raise StepTimeout("victim_login.assert_visible", 1, 4)
+
+        with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            target = replace(target, login_victim=login_victim)
+            with patch.dict(sys.modules, {"playwright": package, "playwright.sync_api": api}):
+                evidence = PlaywrightVictimDriver().run(
+                    candidate, target, manifest.primary_path, "token", 1000, settle=settle,
+                )
+        self.assertEqual(order, ["settle", "stop"])
+        self.assertEqual(evidence.reason, "BROWSER_ERROR")
+        self.assertEqual(evidence.error_stage, "victim_login")
+        self.assertEqual(evidence.error_step, "victim_login.assert_visible")
+        self.assertEqual(evidence.error_step_index, 4)
+        self.assertIsNone(evidence.error_action_index)
+        self.assertEqual(evidence.click_blocker, "not_found")
 
     def test_browser_diagnostics_persist_and_return_safe_actionable_feedback(self) -> None:
         from app.receipt_execution import receipt_agent_feedback
@@ -626,7 +710,7 @@ class ReceiptModelTests(unittest.TestCase):
             def locator(self, *args):
                 return self
 
-            def click(self) -> None:
+            def click(self, **kwargs: object) -> None:
                 pass
 
             def wait_for_timeout(self, *args) -> None:
@@ -716,7 +800,7 @@ class ReceiptModelTests(unittest.TestCase):
                     del args
                     return self
 
-                def click(self) -> None:
+                def click(self, **kwargs: object) -> None:
                     return None
 
                 def wait_for_timeout(self, *args) -> None:
@@ -1794,8 +1878,8 @@ class ReceiptRepairTests(unittest.TestCase):
         seen: dict[str, str] = {}
 
         class Driver:
-            def run(self, candidate, target, path, token, timeout_ms):
-                del path, token, timeout_ms
+            def run(self, candidate, target, path, token, timeout_ms, **kwargs):
+                del path, token, timeout_ms, kwargs
                 seen["validated"] = candidate.validated_base_url
                 seen["base"] = target.base_url
                 return BrowserEvidence(True, "BROWSER_BOUND_RECEIPT", target.base_url)
@@ -1824,6 +1908,31 @@ class ReceiptRepairTests(unittest.TestCase):
         self.assertIn("RuntimeError", text)
         self.assertIn("browser_launch", text)
         self.assertNotIn(secret, text)
+
+    def test_login_selector_timeout_rejects_the_candidate(self) -> None:
+        from app.receipt import _browser_failure_rejects_candidate, _evidence_from_worker
+
+        evidence = _evidence_from_worker({"timeout": True, "step": "victim_login.assert_visible", "index": 4})
+        self.assertEqual(evidence.click_blocker, "not_found")
+        self.assertEqual(evidence.error_step, "victim_login.assert_visible")
+        self.assertEqual(evidence.error_step_index, 4)
+        self.assertIsNone(evidence.error_action_index)
+        self.assertTrue(_browser_failure_rejects_candidate(evidence))
+        launch = _evidence_from_worker({"timeout": True, "step": "browser_launch"})
+        self.assertEqual(launch.click_blocker, "")
+        self.assertFalse(_browser_failure_rejects_candidate(launch))
+
+        class FailedBrowser:
+            def run(self, *args, **kwargs):
+                del args, kwargs
+                return evidence
+
+        result = ReceiptVerifier(
+            adapter=_Adapter(), attacker=_Attacker(), browser=FailedBrowser(), receipt_key=b"k" * 32,
+        ).verify(_candidate(), _manifest(extension_path_budget=0))
+        self.assertEqual(result.verdict, ReceiptVerdict.REJECTED)
+        self.assertEqual(result.primary.evidence["browser_error"]["blocker"], "not_found")
+        self.assertEqual(result.primary.evidence["browser_error"]["step"], "victim_login.assert_visible")
 
     def test_bundle_revalidation_stays_indeterminate(self) -> None:
         class BundleBrowser:
@@ -1886,7 +1995,7 @@ class ReceiptRepairTests(unittest.TestCase):
                 del selector
                 return self
 
-            def click(self) -> None:
+            def click(self, **kwargs: object) -> None:
                 popup = Page("javascript:window.__receipt_accept('token')", "http://target.test")
                 foreign = Page("http://evil.test/open")
                 calls["callback"]({"page": self, "frame": ChildFrame()}, secret)
@@ -1975,7 +2084,7 @@ class ReceiptRepairTests(unittest.TestCase):
                 del selector
                 return self
 
-            def click(self) -> None:
+            def click(self, **kwargs: object) -> None:
                 return None
 
             def wait_for_timeout(self, timeout: int) -> None:
@@ -2062,7 +2171,7 @@ class ReceiptRepairTests(unittest.TestCase):
             def locator(self, selector: str):
                 del selector
 
-                def click() -> None:
+                def click(**kwargs: object) -> None:
                     raise FakeError(f'strict mode violation: locator("{secret}") resolved to 2 elements')
 
                 return types.SimpleNamespace(click=click)

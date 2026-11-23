@@ -89,6 +89,25 @@ def _reap(proc: subprocess.Popen[str]) -> None:
         return
 
 
+def _release(proc: subprocess.Popen[str]) -> None:
+    """结果已经写下时，只再给浏览器关闭一小段时间，然后结束进程树。"""
+    if proc.poll() is not None:
+        return
+    try:
+        proc.wait(timeout=GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        kill_process_tree(proc.pid)
+        _reap(proc)
+
+
+def _read_json_dict(path: Path) -> dict[str, Any] | None:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
 def run_bounded(
     command: list[str],
     timeout: int,
@@ -143,12 +162,22 @@ def _read_step(path: Path) -> dict[str, Any] | None:
     return loaded
 
 
-def supervise(proc: subprocess.Popen[str], step_file: Path, timeout_s: float) -> dict[str, Any]:
-    """等待子进程。同一步停留超过 timeout_s 就结束进程树并返回该步骤。"""
+def supervise(
+    proc: subprocess.Popen[str],
+    step_file: Path,
+    timeout_s: float,
+    result_file: Path | None = None,
+) -> dict[str, Any]:
+    """等待子进程。结果文件一旦写好就返回；同一步停留超过 timeout_s 才结束进程树。"""
     current_step = "playwright_start"
     current_index: int | None = None
     current_started = time.time()
     while True:
+        if result_file is not None:
+            loaded = _read_json_dict(result_file)
+            if loaded is not None:
+                _release(proc)
+                return {"timeout": False, "step": current_step, "index": current_index, "result": loaded}
         info = _read_step(step_file)
         if info is not None and float(info["started"]) != current_started:
             current_step = info["step"]
@@ -157,6 +186,9 @@ def supervise(proc: subprocess.Popen[str], step_file: Path, timeout_s: float) ->
         if time.time() - current_started > timeout_s:
             kill_process_tree(proc.pid)
             _reap(proc)
+            late = _read_json_dict(result_file) if result_file is not None else None
+            if late is not None:
+                return {"timeout": False, "step": current_step, "index": current_index, "result": late}
             return {"timeout": True, "step": current_step, "index": current_index, "timeout_seconds": int(timeout_s)}
         if proc.poll() is not None:
             return {"timeout": False, "step": current_step, "index": current_index}
@@ -189,14 +221,13 @@ def run_browser_job(job: dict[str, Any], timeout_ms: int) -> dict[str, Any]:
         assert proc.stdin is not None
         proc.stdin.write(json.dumps(job).encode("utf-8"))
         proc.stdin.close()
-        outcome = supervise(proc, step_file, timeout_s)
+        outcome = supervise(proc, step_file, timeout_s, result_file)
+        if isinstance(outcome.get("result"), dict):
+            return outcome["result"]
         if outcome.get("timeout"):
             outcome["timeout_seconds"] = reported_timeout
             return outcome
-        try:
-            loaded = json.loads(result_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeError):
-            loaded = None
-        if isinstance(loaded, dict):
+        loaded = _read_json_dict(result_file)
+        if loaded is not None:
             return loaded
         return {"failed": True, "code": proc.returncode, "step": outcome.get("step") or "playwright_start", "index": outcome.get("index")}

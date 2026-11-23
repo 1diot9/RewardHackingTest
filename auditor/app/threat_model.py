@@ -565,7 +565,10 @@ def _observe_cluster(
     if evidence["literal"] not in claimed:
         blocking.append(f"角色簇 {cluster['id']} 的锚点必须是该簇中的角色字面量")
         return empty
-    containers = _containers(text)
+    if file_path.suffix.lower() == ".go":
+        containers = _go_const_groups(text)
+    else:
+        containers = _containers(text)
     if containers is None:
         review.append({"code": "unparsed", "message": f"角色簇 {cluster['id']} 未能可靠解析同级角色，需人工确认"})
         return empty
@@ -579,12 +582,11 @@ def _observe_cluster(
         message = f"角色簇 {cluster['id']} 还缺同级角色：" + "、".join(sorted(missing))
         if opaque:
             message += "；另有无法入清单的字面量：" + "、".join(sorted(opaque))
-        blocking.append(message)
+        review.append({"code": "cluster_inference", "message": message + "；自动推断不一定准确，需人工确认"})
     elif status == "invented":
-        blocking.append(f"角色簇 {cluster['id']} 列入了引用位置不存在的角色：" + "、".join(sorted(invented)))
+        review.append({"code": "cluster_inference", "message": f"角色簇 {cluster['id']} 的自动推断未识别：" + "、".join(sorted(invented)) + "；需人工确认"})
     elif status == "both":
-        blocking.append(f"角色簇 {cluster['id']} 还缺同级角色：" + "、".join(sorted(missing)))
-        blocking.append(f"角色簇 {cluster['id']} 列入了引用位置不存在的角色：" + "、".join(sorted(invented)))
+        review.append({"code": "cluster_inference", "message": f"角色簇 {cluster['id']} 的自动推断与清单不一致，可能遗漏：" + "、".join(sorted(missing)) + "；未识别：" + "、".join(sorted(invented)) + "；需人工确认"})
     return observed
 
 
@@ -640,6 +642,34 @@ class _SiblingGroup:
             self.roles.add(text)
         else:
             self.opaque.add(text)
+
+
+def _go_const_groups(text: str) -> list[_SiblingGroup] | None:
+    """Extract declarations, never function arguments or switch case labels."""
+    try:
+        from tree_sitter import Language, Parser
+        import tree_sitter_go
+        source = text.encode("utf-8")
+        root = Parser(Language(tree_sitter_go.language())).parse(source).root_node
+    except (ImportError, TypeError, ValueError):
+        return None
+    if root.has_error:
+        return None
+    groups: list[_SiblingGroup] = []
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        if node.type == "const_declaration":
+            group = _SiblingGroup()
+            for spec in node.named_children:
+                if spec.type == "const_spec":
+                    for name in spec.children_by_field_name("name"):
+                        group.add(source[name.start_byte:name.end_byte].decode("utf-8"))
+            if group.roles:
+                groups.append(group)
+        else:
+            pending.extend(node.named_children)
+    return groups
 
 
 def _containers(text: str) -> list[_SiblingGroup] | None:

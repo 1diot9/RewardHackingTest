@@ -40,11 +40,36 @@ class GenericAdapterTests(unittest.TestCase):
         first = locator.first
         steps = (LoginStep('assert_visible', selector='.there-are-items'),)
 
+        first.is_visible.return_value = True
         self.assertTrue(_login(page, 'http://127.0.0.1:1234/', steps, {}))
 
         page.locator.assert_called_once_with('.there-are-items')
-        first.wait_for.assert_called_once_with(state='visible')
+        first.is_visible.assert_called()
+        first.wait_for.assert_not_called()
         locator.wait_for.assert_not_called()
+
+    def test_login_click_does_not_wait_for_document_load(self):
+        page = mock.MagicMock()
+        page.url = 'http://127.0.0.1:1234/'
+        self.assertTrue(_login(page, 'http://127.0.0.1:1234/', (LoginStep('click', selector='#submit'),), {}))
+        page.locator.return_value.click.assert_called_once_with(no_wait_after=True)
+
+    def test_login_visibility_timeout_returns_at_the_deadline(self):
+        import time
+        from app.process_bounds import StepTimeout
+
+        page = mock.MagicMock()
+        page.url = 'http://127.0.0.1:1234/'
+        page.locator.return_value.first.is_visible.return_value = False
+        started = time.monotonic()
+        with self.assertRaises(StepTimeout) as caught:
+            _login(
+                page, 'http://127.0.0.1:1234/',
+                (LoginStep('assert_visible', selector='#gone'),), {}, timeout_ms=200,
+            )
+        self.assertEqual(caught.exception.step, 'login.assert_visible')
+        self.assertEqual(caught.exception.index, 0)
+        self.assertLess(time.monotonic() - started, 2)
 
     def test_configuration_and_run_info_reject_invalid_inputs(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -106,6 +131,7 @@ class GenericAdapterTests(unittest.TestCase):
                 victim_login.assert_called_once_with(
                     page, 'http://127.0.0.1:1234/', login_steps,
                     {'username': 'reader', 'password': 'secret2'},
+                    timeout_ms=15000,
                 )
                 self.assertIsNone(target.victim_http_credentials)
                 self.assertEqual(commands[-1][-1], '--cleanup')
@@ -306,6 +332,58 @@ class GenericAdapterTests(unittest.TestCase):
             page.evaluate.side_effect = [None]
             with self.assertRaises(AttackerAuthMissing):
                 _login_cookie_header('http://127.0.0.1:1234/', (), {}, 1000, mappings)
+
+    def test_attacker_network_uses_a_subnet_outside_the_default_pools(self):
+        from app.generic_receipt_adapter import _attacker_subnet, _create_attacker_network
+
+        first = _attacker_subnet('a' * 32)
+        second = _attacker_subnet('a' * 32, 1)
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith('10.240.'))
+        self.assertTrue(first.endswith('/28'))
+        calls = []
+
+        def run(command, cwd, env, timeout):
+            calls.append(command)
+            if calls and command[-1] == 'receipt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-attacker' and len(calls) == 1:
+                error = ReceiptError('环境命令 docker network create 退出码 1')
+                error.detail = 'Pool overlaps with other one on this address space'
+                raise error
+            return 'ok'
+
+        with mock.patch('app.generic_receipt_adapter._run', side_effect=run):
+            _create_attacker_network(Path('.'), {}, 'receipt-' + 'a' * 32 + '-attacker', 'a' * 32)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1:4], ['network', 'create', '--internal'])
+        self.assertEqual(calls[0][4], '--subnet')
+        self.assertEqual(calls[1][5], second)
+
+    def test_stale_empty_receipt_networks_are_removed(self):
+        from datetime import datetime, timedelta, timezone
+        from app.generic_receipt_adapter import _release_stale_receipt_networks
+
+        old = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S.000000000 +0000 UTC')
+        fresh = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.000000000 +0000 UTC')
+        stale = 'receipt-' + 'ab' * 16 + '_default'
+        busy = 'receipt-' + 'cd' * 16 + '-attacker'
+        recent = 'receipt-' + 'ef' * 16 + '_default'
+        removed = []
+
+        def run(command, cwd, env, timeout):
+            if command[1:3] == ['network', 'ls']:
+                return '\n'.join([stale, busy, recent, 'lab-other_default', 'bridge'])
+            if command[1:3] == ['network', 'inspect']:
+                created = fresh if command[3] == recent else old
+                count = '2' if command[3] == busy else '0'
+                return f'{count}|{created}'
+            if command[1:3] == ['network', 'rm']:
+                removed.append(command[3])
+                return command[3]
+            return ''
+
+        with mock.patch('app.generic_receipt_adapter._run', side_effect=run):
+            _release_stale_receipt_networks(Path('.'), {})
+        self.assertEqual(removed, [stale])
 
 
 if __name__ == '__main__':
