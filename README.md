@@ -1,41 +1,83 @@
-# 通用 XSS 审计器
+# XSS 审计与验证引擎
 
-这是一个基于 Claude Agent SDK（Python）的任意源码项目 XSS 审计器。创建项目时上传源码 ZIP；项目下可创建多个拥有独立工作区的审计任务。提示词位于 `prompts/*.md`，运行时代码负责加载和替换占位符。
+基于 Claude Agent SDK 的源码 XSS 审计工具。它将源码导入、环境准备、Agent 审计和可选的 RECEIPT 隔离重放整合到一个本地 Web 界面中，帮助审计人员检查候选漏洞并管理报告。
 
-项目和任务按以下流程准备：
+本仓库包含引擎及其前端，不包含待审计项目、靶场或审计工作区。请仅对获得授权的项目和环境进行测试。
 
-1. 环境准备：在项目页初始化，Agent 生成 Python 环境脚本、`receipt-manifest.json` 和 `receipt-adapter.json`。动态环境必须由上游默认分支的最新提交编译得到；缺少编译器或运行时时应先安装。该提交无法建成时，Agent 写入 `environment/INITIALIZATION_FAILED.md`，系统不再测试，也不接受改用旧镜像凑合的环境。系统检查 Docker，运行脚本验证服务及各账号登录，成功后清理测试实例；失败时保留该次测试实例、运行目录和脚本快照，反馈 Agent 最多修改五次（最多测试六次），最终失败记录在 `INITIALIZATION_FAILED.md`。失败记录包含 Compose 项目名和路径；运行目录可能包含测试凭据。新建审计时将验证器使用的环境材料与 Manifest 固定为独立快照。模型调用产生的费用不计入审计预算。
+## 主要功能
 
-失败的初始化测试位于项目 `setup/runtime/initialization/<运行 ID>/`：`environment/` 是本次测试的脚本快照，`run/` 是运行目录。排错完成后，可在 PowerShell 中设置 `$env:RECEIPT_RUN_ID='<运行 ID>'`、`$env:RECEIPT_RUN_DIR='<run 的绝对路径>'` 和 `$env:COMPOSE_PROJECT_NAME='receipt-<运行 ID>'`，执行 `python '<environment 的绝对路径>/start.py' --cleanup`，再删除对应的运行 ID 目录。每个失败实例都需分别清理。
-2. 审计：检查任务工作区中的环境材料后，手动开始审计。Agent 只读项目的导入源码，报告写入任务的 `findings/`。如提供靶场地址，Agent 可进行受限的动态验证；否则完成静态源码审计。
+- **项目导入**：上传源码 ZIP；同一项目可创建多个独立审计任务，Agent 以只读方式访问导入的源码。
+- **环境准备**：Agent 生成环境脚本和验证器配置，系统测试服务与账号登录，并保存失败测试的诊断材料。
+- **XSS 审计**：通过可编辑提示词驱动 Agent 检查源码；提供目标地址时可进行受限动态验证。
+- **RECEIPT 验证**：使用可信 Manifest 和 Adapter 重放候选 PoC，返回验证结果；内置 `generic-compose` Adapter 为每次重放启动独立 Compose 项目。
+- **报告与任务管理**：在界面中查看漏洞报告、验证状态、任务进度及模型用量。
 
-前端的“漏洞报告”区域只展示 Agent 写入的 `findings/*.md`。启用验证器时，提交候选项需提供候选项到报告路径的关联，系统根据最近一次 RECEIPT 返回值显示“审核通过”“审核不通过”或“待审核”（包括验证不确定）。关联和状态独立保存，不解析报告正文。笔记、PoC 与验证原始结果不在该区域展示。
+## 环境要求
 
-## ZIP 导入边界
+- Windows、PowerShell、Python 和 Node.js/npm。
+- 可用的模型服务及其连接、模型和定价配置。
+- 使用环境初始化或 RECEIPT 动态重放时，需要运行 Docker 和 Docker Compose，并能够获取所需镜像。
 
-仅接受 ZIP，最多包含 100,000 个文件、解压后最多 250 MiB。导入器会拒绝空包、超过上限的压缩包，以及绝对路径、父目录路径和符号链接；在 Windows 上也会拒绝系统不支持的文件名。导入时支持 Windows 长路径，使用源码的外部工具仍需自身支持长路径。导入的源码保存在项目目录，同项目下的审计共享源码；Agent 不能改写它。
+Python 依赖见 `requirements.txt`，前端依赖见 `frontend/package.json`。首次启动时脚本会检查并安装缺失的依赖。
 
-## 可选验证器
+## 快速开始
 
-验证器沿用 RECEIPT 协议：创建任务时由用户在前端选择一个可信 Manifest。Agent 仅能调用内置的同步验证工具提交受约束的版本化 PoC 清单；工具会在当前 Agent 回合内完成隔离重放，并仅返回脱敏的 `poc_id`、verdict 和 reason。身份、路径和最终判定由任务绑定的可信 Manifest 与 Adapter 决定，Agent 不能选择或读取它们；但可在每个 PoC 中声明认证步骤及受害者触发操作，验证器只会将这些步骤应用到该路径预先固定的账号。前端/API 的人工重放端点也只能使用任务已经绑定的 Manifest：
+1. 克隆仓库，在根目录双击 `start.bat`，或运行：
 
-排查失败时，可查看任务工作区 `receipt/diagnostics.jsonl`：每行包含阶段和运行 ID，适用时记录命令退出码、超时、错误输出或异常。日志位于受保护的 RECEIPT 目录，不提供给 Agent；记录前会过滤已知凭据及敏感字段行，仍应按敏感运行数据管理。历史验证不会自动补全诊断信息，需重新验证后查看。
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\start.ps1
+   ```
 
-```text
+2. 打开 <http://127.0.0.1:5179/>。后端默认监听 `127.0.0.1:8787`。
+3. 在“模型商”中配置连接、获取模型并设置定价。
+4. 创建项目并上传源码 ZIP，在项目中初始化环境，然后创建并开始审计任务。
+
+使用 `stop.bat` 停止服务，使用 `restart.bat` 重启；也可分别运行对应的 PowerShell 脚本。初始化 Agent 的 HTTP/HTTPS 代理可在“设置 → 初始化网络代理”配置，该设置只影响新启动的初始化会话，不会自动配置 Docker 网络或镜像拉取。
+
+## 审计和验证流程
+
+1. **导入源码**：仅支持 ZIP，最多 100,000 个文件、解压后最多 250 MiB。导入器拒绝空包、超限文件、绝对路径、父目录路径及符号链接；Windows 上也会拒绝不受支持的文件名。
+2. **准备环境**：初始化 Agent 生成环境脚本、`receipt-manifest.json` 和 `receipt-adapter.json`。动态环境要求从上游默认分支的最新提交构建。系统测试服务及账号，失败时反馈 Agent 修改；最终无法完成时记录失败原因。
+3. **执行审计**：任务使用固定的环境材料和 Manifest 快照。Agent 将报告写入工作区的 `findings/`；未提供靶场地址时执行静态审计。
+4. **验证候选项**：启用验证器后，Agent 提交受约束的版本化 PoC 清单，由绑定的可信 Manifest 和 Adapter 决定身份、路径及最终判定。界面按最近一次验证结果展示报告状态；静态检查通过不代表重放一定成功。
+
+## RECEIPT 配置与排错
+
+在“设置 → RECEIPT 验证器”中配置独立的证据签名密钥和以不可变 digest 指定的攻击者镜像。自动配置可补齐缺失项，并在镜像不存在时尝试拉取。也可通过 `RECEIPT_EVIDENCE_HMAC_KEY` 和 `RECEIPT_ATTACKER_IMAGE` 提供配置；自定义可信 Adapter 通过 `RECEIPT_TRUSTED_ADAPTER_MODULES` 指定。
+
+人工重放使用任务已绑定的 Manifest：
+
+```http
 POST /api/tasks/{task_id}/receipt/verify
+Content-Type: application/json
+
 {"poc_id":"001-example"}
 ```
 
-Manifest 不需要签名。内置 `generic-compose` Adapter 使用项目初始化产物，每次重放启动独立 Compose 项目；动态宿主机端口和随机账号仅通过本次运行的 `receipt-run.json` 传递。在“设置 → RECEIPT 验证器”中配置独立的证据签名密钥和不可变 digest 形式的攻击者镜像后即可使用。设置保存在本地 `data/state.json`，密钥只以掩码形式返回前端；未在设置中填写时，仍兼容读取 `RECEIPT_EVIDENCE_HMAC_KEY` 和 `RECEIPT_ATTACKER_IMAGE` 环境变量。自定义可信 Adapter 仍可通过 `RECEIPT_TRUSTED_ADAPTER_MODULES` 安装。静态检查通过不保证重放成功。
+验证失败时可查看任务工作区的 `receipt/diagnostics.jsonl`。日志会过滤已知凭据和敏感字段行，但仍应作为敏感运行数据管理。初始化失败时，项目的 `setup/runtime/initialization/<运行 ID>/` 保留环境脚本快照和运行目录；排错完成后应按生成的环境说明清理对应 Docker 资源。
 
-设置页的“自动配置”会保留已有配置，缺少密钥时生成随机密钥，缺少镜像配置时使用 `python:3.12-slim` 的仓库 digest；镜像在本地不存在时会通过 Docker 拉取。使用前请启动 Docker；拉取失败时页面会显示错误，且不会保存部分配置。
+## 目录结构
 
-## 运行
+```text
+app/           FastAPI 后端、审计任务和验证器
+frontend/      React 前端
+prompts/       可编辑的 Agent 提示词
+runtime/       PoC 运行时辅助代码
+tests/         后端测试
+data/          本地配置和状态（不提交）
+projects/      导入的项目及初始化数据（不提交）
+workspaces/    审计任务工作区和结果（不提交）
+```
 
-在“设置 → 初始化网络代理”中可为新启动的环境初始化 Agent 启用 HTTP/HTTPS 代理，例如 `http://127.0.0.1:7890`（端口以本机代理软件为准）。支持填写逗号分隔的额外直连地址；`localhost`、`127.0.0.1`、`::1`、`host.docker.internal` 和已知靶场地址自动加入直连列表，其他内网地址需自行添加。设置保存在本地 `data/state.json`，不支持在代理地址中填写账号密码。设置只作用于新建的初始化 Agent 会话；各工具是否遵循代理变量取决于自身实现。Docker 镜像拉取、构建和容器网络需要在 Docker 中分别配置。
+`data/state.json` 可能包含模型服务凭据和验证器密钥，请妥善保管。删除项目会删除其审计任务和工作区；初始化过程中启动的 Docker 资源可能需要单独清理。
 
-双击仓库根目录的 `start.bat`。脚本会在需要时安装依赖，启动 API（`127.0.0.1:8787`）与前端（`127.0.0.1:5179`）。
+## 开发与测试
 
-双击 `restart.bat`，或运行 `powershell -ExecutionPolicy Bypass -File .\restart.ps1`，可先停止审计器再重新启动。若端口仍被占用，脚本会报错并停止重启。
+在仓库根目录运行：
 
-先在“模型商”中完成连接、模型获取和定价；随后创建项目并上传 ZIP，在项目中初始化环境和创建审计。靶场地址是可选项，但启用验证器时必须提供。删除项目会删除其审计和工作区；初始化可能启动的 Docker 资源需要按生成的环境说明单独清理。密钥位于 `data/state.json`，项目和任务数据分别位于 `projects/`、`workspaces/`，均不应提交。
+```powershell
+python -m unittest discover -s tests -v
+npm --prefix frontend run build
+```
+
+前端开发服务器可通过 `npm --prefix frontend run dev` 启动。API 和前端的一键启动脚本面向本地使用。
