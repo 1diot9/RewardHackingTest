@@ -26,16 +26,16 @@ POST /api/tasks/{task_id}/receipt/verify
 {"poc_id":"001-example"}
 ```
 
-Manifest 不需要签名。内置 `generic-compose` Adapter 使用项目初始化产物，每次重放启动独立 Compose 项目；动态宿主机端口和随机账号仅通过本次运行的 `receipt-run.json` 传递。在“设置 → RECEIPT 验证器”中配置独立的证据签名密钥和不可变 digest 形式的攻击者镜像后即可使用。设置保存在本地 `auditor/data/state.json`，密钥只以掩码形式返回前端；未在设置中填写时，仍兼容读取 `RECEIPT_EVIDENCE_HMAC_KEY` 和 `RECEIPT_ATTACKER_IMAGE` 环境变量。文件及脚本契约见 [验证器文件契约](../docs/contracts/receipt_adapter.md)。自定义可信 Adapter 仍可通过 `RECEIPT_TRUSTED_ADAPTER_MODULES` 安装。静态检查通过不保证重放成功。
+Manifest 不需要签名。内置 `generic-compose` Adapter 使用项目初始化产物，每次重放启动独立 Compose 项目；动态宿主机端口和随机账号仅通过本次运行的 `receipt-run.json` 传递。在“设置 → RECEIPT 验证器”中配置独立的证据签名密钥和不可变 digest 形式的攻击者镜像后即可使用。设置保存在本地 `data/state.json`，密钥只以掩码形式返回前端；未在设置中填写时，仍兼容读取 `RECEIPT_EVIDENCE_HMAC_KEY` 和 `RECEIPT_ATTACKER_IMAGE` 环境变量。自定义可信 Adapter 仍可通过 `RECEIPT_TRUSTED_ADAPTER_MODULES` 安装。静态检查通过不保证重放成功。
 
 设置页的“自动配置”会保留已有配置，缺少密钥时生成随机密钥，缺少镜像配置时使用 `python:3.12-slim` 的仓库 digest；镜像在本地不存在时会通过 Docker 拉取。使用前请启动 Docker；拉取失败时页面会显示错误，且不会保存部分配置。
 
 ## 运行
 
-在“设置 → 初始化网络代理”中可为新启动的环境初始化 Agent 启用 HTTP/HTTPS 代理，例如 `http://127.0.0.1:7890`（端口以本机代理软件为准）。支持填写逗号分隔的额外直连地址；`localhost`、`127.0.0.1`、`::1`、`host.docker.internal` 和已知靶场地址自动加入直连列表，其他内网地址需自行添加。设置保存在本地 `auditor/data/state.json`，不支持在代理地址中填写账号密码。设置只作用于新建的初始化 Agent 会话；各工具是否遵循代理变量取决于自身实现。Docker 镜像拉取、构建和容器网络需要在 Docker 中分别配置。
+在“设置 → 初始化网络代理”中可为新启动的环境初始化 Agent 启用 HTTP/HTTPS 代理，例如 `http://127.0.0.1:7890`（端口以本机代理软件为准）。支持填写逗号分隔的额外直连地址；`localhost`、`127.0.0.1`、`::1`、`host.docker.internal` 和已知靶场地址自动加入直连列表，其他内网地址需自行添加。设置保存在本地 `data/state.json`，不支持在代理地址中填写账号密码。设置只作用于新建的初始化 Agent 会话；各工具是否遵循代理变量取决于自身实现。Docker 镜像拉取、构建和容器网络需要在 Docker 中分别配置。
 
-双击仓库根目录的 `start-auditor.bat`，或 `auditor/start.bat`。脚本会在需要时安装依赖，启动 API（`127.0.0.1:8787`）与前端（`127.0.0.1:5179`）。
+双击仓库根目录的 `start.bat`。脚本会在需要时安装依赖，启动 API（`127.0.0.1:8787`）与前端（`127.0.0.1:5179`）。
 
-双击 `auditor/restart.bat`，或运行 `powershell -ExecutionPolicy Bypass -File .\auditor\restart.ps1`，可先停止审计器再重新启动。若端口仍被占用，脚本会报错并停止重启。
+双击 `restart.bat`，或运行 `powershell -ExecutionPolicy Bypass -File .\restart.ps1`，可先停止审计器再重新启动。若端口仍被占用，脚本会报错并停止重启。
 
-先在“模型商”中完成连接、模型获取和定价；随后创建项目并上传 ZIP，在项目中初始化环境和创建审计。靶场地址是可选项，但启用验证器时必须提供。删除项目会删除其审计和工作区；初始化可能启动的 Docker 资源需要按生成的环境说明单独清理。密钥位于 `auditor/data/state.json`，项目和任务数据分别位于 `auditor/projects/`、`auditor/workspaces/`，均不应提交。
+先在“模型商”中完成连接、模型获取和定价；随后创建项目并上传 ZIP，在项目中初始化环境和创建审计。靶场地址是可选项，但启用验证器时必须提供。删除项目会删除其审计和工作区；初始化可能启动的 Docker 资源需要按生成的环境说明单独清理。密钥位于 `data/state.json`，项目和任务数据分别位于 `projects/`、`workspaces/`，均不应提交。
