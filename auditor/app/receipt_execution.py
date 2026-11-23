@@ -344,6 +344,12 @@ def _describe_browser_failure(path: PathResult) -> tuple[str, str]:
                     description += " Check the submitted victim login steps and selectors."
                 elif detail.get("stage") == "victim_navigation":
                     description += " Check the victim URL and target availability."
+            step = detail.get("step") if isinstance(detail, dict) else None
+            if isinstance(step, str) and step:
+                description += f" Step: {step}."
+                step_index = detail.get("step_index")
+                if type(step_index) is int and 0 <= step_index < 30:
+                    description += f" Step index: {step_index}."
         return description, _REASON_NEXT_STEPS["BROWSER_ERROR"]
     description = _REASON_DESCRIPTIONS[path.reason]
     next_step = _REASON_NEXT_STEPS.get(path.reason, "")
@@ -382,7 +388,7 @@ def _outcome_group_key(path: PathResult, roles: Mapping[str, str]) -> tuple[str,
     detail = browser if isinstance(browser, dict) else {}
     index = detail.get("action_index")
     action_index = index if type(index) is int else None
-    blocker = detail.get("blocker") if detail.get("blocker") in {"not_found", "intercepted"} else ""
+    blocker = detail.get("blocker") if detail.get("blocker") in {"not_found", "intercepted", "ambiguous"} else ""
     return role, path.verdict.value, path.reason, action_index, blocker
 
 
@@ -396,6 +402,8 @@ def _outcome_group_line(key: tuple[str, str, str, int | None, str], count: int) 
         line += ", element not found"
     elif blocker == "intercepted":
         line += ", element intercepted"
+    elif blocker == "ambiguous":
+        line += ", element matched more than once"
     return line
 
 
@@ -472,6 +480,10 @@ def receipt_agent_feedback(
                     feedback["reason_description"] += f" Exit code: {detail['exit_code']}."
                 if type(detail.get("timeout_seconds")) is int:
                     feedback["reason_description"] += f" Timeout: {detail['timeout_seconds']} seconds."
+                if isinstance(detail.get("step"), str) and detail["step"]:
+                    feedback["reason_description"] += f" Step: {detail['step']}."
+                if type(detail.get("index")) is int:
+                    feedback["reason_description"] += f" Step index: {detail['index']}."
                 feedback["reason_description"] += " See the protected receipt/diagnostics.jsonl for details."
         if safe_reason == "ADAPTER_ERROR":
             detail = decisive_path.evidence.get("error", {})

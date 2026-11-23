@@ -22,6 +22,7 @@ from dataclasses import dataclass, field, replace
 
 from app.receipt_settings import is_pinned_attacker_image
 from app import receipt_diagnostics as diagnostics
+from app.process_bounds import StepTimeout, browser_runs_inprocess, mark_step, run_browser_job
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
@@ -263,6 +264,7 @@ class ReceiptCandidate:
     note: str = ""
     callback_routes: tuple[CallbackRoute, ...] = ()
     source_hash: str = ""
+    validated_base_url: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any], *, base_url: str) -> "ReceiptCandidate":
@@ -319,6 +321,7 @@ class ReceiptCandidate:
             note=note,
             callback_routes=routes,
             source_hash=hashlib.sha256(source).hexdigest(),
+            validated_base_url=base_url,
         )
 
     def as_mapping(self) -> dict[str, Any]:
@@ -457,6 +460,7 @@ class TargetRun:
     snapshot_id: str
     login_attacker: Callable[..., str | AttackerSession] | None = None
     victim_http_credentials: dict[str, str] | None = None
+    victim_account: dict[str, str] | None = None
 
 
 class TargetAdapter(Protocol):
@@ -517,6 +521,8 @@ class BrowserEvidence:
     error_action_index: int | None = None
     navigation_status: int | None = None
     click_blocker: str = ""
+    error_step: str = ""
+    error_step_index: int | None = None
 
 
 _SCRIPT_EXCEPTION_NAMES = (
@@ -555,17 +561,16 @@ def _attacker_reason_is_infrastructure(reason: str) -> bool:
 
 
 _CANDIDATE_BROWSER_STAGES = frozenset({"victim_login", "victim_action"})
-_CANDIDATE_BROWSER_BLOCKERS = frozenset({"not_found", "intercepted"})
+_CANDIDATE_BROWSER_BLOCKERS = frozenset({"not_found", "intercepted", "ambiguous"})
 
 
 def _browser_failure_rejects_candidate(evidence: BrowserEvidence) -> bool:
-    """浏览器已执行到登录或受害者动作，元素缺失或被挡住。这是候选项失败，不是验证器故障。"""
-    return (
-        evidence.reason == "BROWSER_ERROR"
-        and evidence.error_type == "playwright_timeout"
-        and evidence.error_stage in _CANDIDATE_BROWSER_STAGES
-        and evidence.click_blocker in _CANDIDATE_BROWSER_BLOCKERS
-    )
+    """浏览器已执行到登录或受害者动作，元素缺失、被挡住或匹配到多个。这是候选项失败，不是验证器故障。"""
+    if evidence.reason != "BROWSER_ERROR" or evidence.error_stage not in _CANDIDATE_BROWSER_STAGES:
+        return False
+    if evidence.click_blocker in {"not_found", "intercepted"} and evidence.error_type == "playwright_timeout":
+        return True
+    return evidence.click_blocker == "ambiguous" and evidence.error_type == "playwright_error"
 
 
 def _exception_name_from_stderr(stderr: str) -> str:
@@ -593,6 +598,11 @@ def _classify_attacker_exit(returncode: int, stderr: str) -> str:
 
 def _classify_login_exception(exc: BaseException) -> str:
     """选择器超时仍是提交内容的问题；浏览器缺失、启动失败和关闭失败不是。"""
+    if isinstance(exc, StepTimeout):
+        action = exc.step.rsplit(".", 1)[-1]
+        if action in {"start", "launch", "close", "cookies", "storage"}:
+            return "ATTACKER_LOGIN_UNAVAILABLE"
+        return "ATTACKER_LOGIN_FAILED"
     if isinstance(exc, AttackerAuthMissing):
         return "ATTACKER_LOGIN_FAILED"
     if isinstance(exc, (ImportError, ReceiptError, OSError)):
@@ -657,7 +667,18 @@ class DockerAttackerExecutor:
                 session = AttackerSession(cookie=login_result) if isinstance(login_result, str) else login_result
                 diagnostics.add_secrets(session.cookie, *session.headers.values())
             except Exception as exc:
-                diagnostics.record("attacker_login", run_id=target.run_id, error=f"{type(exc).__name__}: {exc}")
+                details: dict[str, Any] = {}
+                if isinstance(exc, StepTimeout):
+                    details["step"] = exc.step
+                    details["timeout_seconds"] = int(exc.timeout_seconds) if exc.timeout_seconds else None
+                    if exc.index is not None:
+                        details["index"] = exc.index
+                diagnostics.record(
+                    "attacker_login",
+                    run_id=target.run_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                    **{key: value for key, value in details.items() if value is not None},
+                )
                 return False, _classify_login_exception(exc)
             if not session.cookie and not session.headers:
                 return False, "ATTACKER_LOGIN_FAILED"
@@ -849,12 +870,123 @@ class DockerAttackerExecutor:
 
 
 def _click_blocker(message: str) -> str:
-    """把点击超时收成固定类别。异常原文、选择器和页面片段不进入结果。"""
+    """把点击失败收成固定类别。异常原文、选择器和页面片段不进入结果。"""
+    if "strict mode violation" in message:
+        return "ambiguous"
     if "intercepts pointer events" in message:
         return "intercepted"
     if "locator resolved" not in message:
         return "not_found"
     return ""
+
+
+def _evidence_from_worker(result: dict[str, Any], *, run_id: str = "") -> BrowserEvidence:
+    if result.get("timeout"):
+        step = str(result.get("step") or "playwright_start")
+        index = result.get("index") if type(result.get("index")) is int else None
+        stage = step.split(".", 1)[0]
+        return BrowserEvidence(
+            False, "BROWSER_ERROR", "", (), stage, "playwright_timeout",
+            index if stage == "victim_action" else None, None, "", step, index,
+        )
+    if result.get("error") == "CANDIDATE_INVALID":
+        diagnostics.record("candidate_revalidation", run_id=run_id, error="CANDIDATE_INVALID")
+        return BrowserEvidence(False, "RECEIPT_BUNDLE_INVALID")
+    if result.get("kind") != "evidence":
+        error_name = result.get("error")
+        if not isinstance(error_name, str) or not error_name or len(error_name) > 80:
+            error_name = "worker_failed"
+        step = result.get("step") if isinstance(result.get("step"), str) else ""
+        index = result.get("index") if type(result.get("index")) is int else None
+        diagnostics.record("victim_browser_worker", run_id=run_id, error=error_name, step=step, index=index)
+        return BrowserEvidence(False, "BROWSER_UNAVAILABLE")
+    action_index = result.get("error_action_index")
+    step_index = result.get("error_step_index")
+    navigation_status = result.get("navigation_status")
+    return BrowserEvidence(
+        bool(result.get("accepted")),
+        str(result.get("reason") or "BROWSER_ERROR"),
+        str(result.get("document_origin") or ""),
+        tuple(item for item in result.get("action_trace") or () if isinstance(item, str)),
+        str(result.get("error_stage") or ""),
+        str(result.get("error_type") or ""),
+        action_index if type(action_index) is int else None,
+        navigation_status if type(navigation_status) is int else None,
+        str(result.get("click_blocker") or ""),
+        str(result.get("error_step") or ""),
+        step_index if type(step_index) is int else None,
+    )
+
+
+def _victim_browser_bounded(
+    candidate: ReceiptCandidate,
+    target: TargetRun,
+    path: ThreatPath,
+    token: str,
+    timeout_ms: int,
+) -> BrowserEvidence:
+    result = run_browser_job(
+        {
+            "op": "victim_browser",
+            "candidate": candidate.as_mapping(),
+            "base_url": target.base_url,
+            "validation_base_url": candidate.validated_base_url,
+            "path": {
+                "id": path.id,
+                "attacker_principal": path.attacker_principal,
+                "victim_principal": path.victim_principal,
+                "primary": path.primary,
+                "accept_self_xss": path.accept_self_xss,
+            },
+            "allowed_origins": list(target.allowed_origins),
+            "victim_account": target.victim_account or {},
+            "http_credentials": target.victim_http_credentials,
+            "run_id": target.run_id,
+            "token": token,
+            "timeout_ms": timeout_ms,
+        },
+        timeout_ms,
+    )
+    return _evidence_from_worker(result, run_id=target.run_id)
+
+
+def _receipt_init_script(binding: str, token: str) -> str:
+    return """(() => {
+const report = window[%s];
+const expected = %s;
+const accept = Object.freeze((value) => {
+  if (typeof value === 'string' && value === expected) report(value);
+});
+Object.defineProperty(window, '__receipt_accept', {
+  value: accept, writable: false, enumerable: false, configurable: false
+});
+})();""" % (json.dumps(binding), json.dumps(token))
+
+
+def _receipt_page_origin(page: Any) -> str:
+    """普通页面用来源 URL。javascript: 和 about:blank 读取文档 origin，读不到就不接受。"""
+    url = str(getattr(page, "url", "") or "")
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() in {"http", "https"} and parsed.hostname:
+        return _origin_of(url)
+    if parsed.scheme.lower() not in {"javascript", "about", "data", "blob", ""}:
+        return ""
+    try:
+        origin = page.evaluate("() => location.origin")
+    except Exception:
+        return ""
+    if not isinstance(origin, str) or origin in {"", "null"}:
+        return ""
+    return _origin_of(origin)
+
+
+def _wait_for_receipt(page: Any, hit: dict[str, str], timeout_ms: int) -> None:
+    """收到回执即停止。总等待不超过这一步已有的超时。"""
+    waited = 0
+    while not hit and waited < timeout_ms:
+        step = min(100, timeout_ms - waited)
+        page.wait_for_timeout(step)
+        waited += step
 
 
 class PlaywrightVictimDriver:
@@ -868,6 +1000,8 @@ class PlaywrightVictimDriver:
         token: str,
         timeout_ms: int,
     ) -> BrowserEvidence:
+        if not browser_runs_inprocess():
+            return _victim_browser_bounded(candidate, target, path, token, timeout_ms)
         try:
             from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError, sync_playwright
         except ImportError as exc:
@@ -877,7 +1011,6 @@ class PlaywrightVictimDriver:
         hit: dict[str, str] = {}
         trace: list[str] = []
         binding = "__receipt_binding_" + secrets.token_hex(16)
-        recording = False
         accepted_url = _render_template(candidate.victim_url, token)
         absolute_url = urljoin(target.base_url.rstrip("/") + "/", accepted_url.lstrip("/"))
         if _origin_of(absolute_url) not in target.allowed_origins:
@@ -887,42 +1020,46 @@ class PlaywrightVictimDriver:
         navigation_status: int | None = None
         outcome: BrowserEvidence | None = None
         try:
+            mark_step(stage)
             with sync_playwright() as playwright:
                 stage = "browser_launch"
+                mark_step(stage)
                 browser = playwright.chromium.launch(**_chromium_launch_options(playwright.chromium.executable_path))
                 stage = "context_create"
+                mark_step(stage)
                 context_options: dict[str, Any] = {}
                 if target.victim_http_credentials:
                     context_options["http_credentials"] = dict(target.victim_http_credentials)
                 context = browser.new_context(**context_options)
                 stage = "request_restriction"
+                mark_step(stage)
                 _restrict_browser_requests(context, target.allowed_origins)
                 stage = "page_create"
+                mark_step(stage)
                 page = context.new_page()
+                recording_flag = [False]
 
                 def on_receipt(source, value):  # Playwright binding callback
-                    if not recording or source["page"] != page or source["frame"] != page.main_frame:
+                    if not recording_flag[0]:
                         return
-                    if value != token or _origin_of(page.url) not in target.allowed_origins:
+                    source_page = source.get("page") if isinstance(source, dict) else None
+                    frame = source.get("frame") if isinstance(source, dict) else None
+                    if source_page is None or frame is None or frame != getattr(source_page, "main_frame", None):
                         return
-                    hit["url"] = page.url
+                    if value != token:
+                        return
+                    origin = _receipt_page_origin(source_page)
+                    if origin not in target.allowed_origins:
+                        return
+                    hit["url"] = origin
 
                 stage = "sentinel_setup"
-                page.expose_binding(binding, on_receipt)
-                page.add_init_script(
-                    """(() => {
-const report = window[%s];
-const expected = %s;
-const accept = Object.freeze((value) => {
-  if (typeof value === 'string' && value === expected) report(value);
-});
-Object.defineProperty(window, '__receipt_accept', {
-  value: accept, writable: false, enumerable: false, configurable: false
-});
-})();""" % (json.dumps(binding), json.dumps(token))
-                )
+                mark_step(stage)
+                context.expose_binding(binding, on_receipt)
+                context.add_init_script(_receipt_init_script(binding, token))
                 page.set_default_timeout(timeout_ms)
                 stage = "victim_login"
+                mark_step(stage)
                 session_before = None
                 if candidate.victim_login and not target.login_victim(page, path.victim_principal, candidate.victim_login):
                     stage = "browser_close"
@@ -931,9 +1068,11 @@ Object.defineProperty(window, '__receipt_accept', {
                 else:
                     if candidate.victim_login:
                         stage = "victim_identity"
+                        mark_step(stage)
                         session_before = _session_cookies(context)
-                    recording = True
+                    recording_flag[0] = True
                     stage = "victim_navigation"
+                    mark_step(stage)
                     response = page.goto(absolute_url, wait_until="domcontentloaded")
                     status = getattr(response, "status", None)
                     if type(status) is int and 100 <= status <= 599:
@@ -942,13 +1081,16 @@ Object.defineProperty(window, '__receipt_accept', {
                     _assert_allowed_page(page.url, target.allowed_origins)
                     for action_index, action in enumerate(candidate.victim_actions):
                         stage = "victim_action"
+                        mark_step(f"victim_action.{action.type}", action_index)
                         _playwright_action(page, action, token, trace)
                         stage = "action_origin_check"
+                        mark_step(stage, action_index)
                         _assert_allowed_page(page.url, target.allowed_origins)
                     action_index = None
                     identity_changed = False
                     if session_before is not None:
                         stage = "victim_identity"
+                        mark_step(stage)
                         identity_changed = _session_identity_changed(session_before, _session_cookies(context))
                     if identity_changed:
                         stage = "browser_close"
@@ -956,14 +1098,24 @@ Object.defineProperty(window, '__receipt_accept', {
                         outcome = BrowserEvidence(False, "VICTIM_IDENTITY_CHANGED", "", tuple(trace), navigation_status=navigation_status)
                     else:
                         stage = "receipt_wait"
-                        page.wait_for_timeout(100)
-                        origin = _origin_of(hit.get("url", "")) if hit else ""
+                        mark_step(stage)
+                        _wait_for_receipt(page, hit, timeout_ms)
+                        origin = hit.get("url", "") if hit else ""
                         stage = "browser_close"
+                        mark_step(stage)
                         _close_browser(browser)
                         if hit:
                             outcome = BrowserEvidence(True, "BROWSER_BOUND_RECEIPT", origin, tuple(trace))
                         else:
                             outcome = BrowserEvidence(False, "NO_BROWSER_BOUND_RECEIPT", "", tuple(trace), navigation_status=navigation_status)
+        except StepTimeout as exc:
+            if outcome is not None:
+                return outcome
+            diagnostics.record("victim_browser", run_id=target.run_id, error=f"{type(exc).__name__}: {exc.step}", browser_stage=stage, step=exc.step)
+            return BrowserEvidence(
+                False, "BROWSER_ERROR", "", tuple(trace), "victim_login", "playwright_timeout",
+                exc.index, navigation_status, "", exc.step, exc.index,
+            )
         except Exception as exc:
             if outcome is not None:
                 return outcome
@@ -980,7 +1132,13 @@ Object.defineProperty(window, '__receipt_accept', {
             else:
                 error_type = "unexpected_error"
             blocker = _click_blocker(str(exc)) if error_type == "playwright_timeout" else ""
-            return BrowserEvidence(False, "BROWSER_ERROR", "", tuple(trace), stage, error_type, action_index, navigation_status, blocker)
+            if "strict mode violation" in str(exc):
+                blocker = "ambiguous"
+            error_step = f"victim_action.{trace[-1]}" if stage == "victim_action" and trace else stage
+            return BrowserEvidence(
+                False, "BROWSER_ERROR", "", tuple(trace), stage, error_type, action_index, navigation_status, blocker,
+                error_step, action_index,
+            )
         return outcome if outcome is not None else BrowserEvidence(False, "BROWSER_ERROR", "", tuple(trace), stage, "unexpected_error", action_index, navigation_status)
 
 
@@ -1123,7 +1281,7 @@ class ReceiptVerifier:
                             run_id,
                             {"token_hmac": token_hmac, "document_origin": evidence.document_origin, "actions": list(evidence.action_trace)},
                         )
-                    infrastructure_browser = evidence.reason == "BROWSER_UNAVAILABLE" or (
+                    infrastructure_browser = evidence.reason in {"BROWSER_UNAVAILABLE", "RECEIPT_BUNDLE_INVALID"} or (
                         evidence.reason == "BROWSER_ERROR" and not _browser_failure_rejects_candidate(evidence)
                     )
                     verdict = ReceiptVerdict.INDETERMINATE if infrastructure_browser else ReceiptVerdict.REJECTED
@@ -1134,7 +1292,11 @@ class ReceiptVerifier:
                         details["browser_error"] = {"stage": evidence.error_stage, "type": evidence.error_type}
                         if evidence.error_action_index is not None:
                             details["browser_error"]["action_index"] = evidence.error_action_index
-                        if evidence.click_blocker in {"not_found", "intercepted"}:
+                        if evidence.error_step:
+                            details["browser_error"]["step"] = evidence.error_step
+                        if evidence.error_step_index is not None:
+                            details["browser_error"]["step_index"] = evidence.error_step_index
+                        if evidence.click_blocker in {"not_found", "intercepted", "ambiguous"}:
                             details["browser_error"]["blocker"] = evidence.click_blocker
                     return PathResult(path.id, verdict, evidence.reason, run_id, details)
                 finally:

@@ -5,7 +5,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,6 +14,7 @@ from urllib.parse import urljoin, urlsplit
 from app.environment_test import _script
 from app.project_import import remove_tree
 from app import receipt_diagnostics as diagnostics
+from app.process_bounds import STEP_PREFIX_ENV, StepTimeout, browser_runs_inprocess, mark_step, run_bounded, run_browser_job
 from app.receipt import AttackerAuthMissing, AttackerSession, AuthHeader, LoginStep, ReceiptError, TargetManifest, TargetRun, ThreatPath, _origin_of
 
 ADAPTER_NAME = "generic-compose"
@@ -74,18 +74,17 @@ def _run(command: list[str], cwd: Path, env: dict[str, str], timeout: int) -> st
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             pass
     try:
-        result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False)
+        result = run_bounded(command, timeout, stage, cwd=cwd, env=env)
         if result.returncode:
             register_accounts()
             diagnostics.record("environment_command", run_id=env.get("RECEIPT_RUN_ID", ""), command=stage,
                                exit_code=result.returncode, stdout=result.stdout, stderr=result.stderr)
             raise ReceiptError(f"环境命令 {stage} 退出码 {result.returncode}")
         return result.stdout.strip()
-    except subprocess.TimeoutExpired as exc:
+    except StepTimeout as exc:
         register_accounts()
         diagnostics.record("environment_command", run_id=env.get("RECEIPT_RUN_ID", ""), command=stage,
-                           error=f"{type(exc).__name__}: {exc}", timeout_seconds=timeout,
-                           stdout=str(exc.stdout or ""), stderr=str(exc.stderr or ""))
+                           error=f"{type(exc).__name__}: {exc.step}", timeout_seconds=timeout, step=exc.step)
         raise ReceiptError(f"环境命令 {stage} 超时（{timeout} 秒）") from exc
     except OSError as exc:
         diagnostics.record("environment_command", run_id=env.get("RECEIPT_RUN_ID", ""), command=stage, error=f"{type(exc).__name__}: {exc}")
@@ -105,22 +104,30 @@ def page_http_credentials(mode: str, account: dict[str, str]) -> dict[str, str] 
 
 def _login(page: Any, base_url: str, steps: tuple[LoginStep, ...], account: dict[str, str]) -> bool:
     """执行候选 PoC 提交的受限认证步骤。"""
-    for step in steps:
+    prefix = os.environ.get(STEP_PREFIX_ENV) or "login"
+    for index, step in enumerate(steps):
         kind = step.type
-        if kind == "goto":
-            page.goto(urljoin(base_url, step.path), wait_until="domcontentloaded")
-        elif kind == "fill":
-            page.locator(step.selector).fill(account["username" if step.value == "{{username}}" else "password"])
-        elif kind == "click":
-            page.locator(step.selector).click()
-        else:
-            # A visibility assertion is an existence check, not an assertion
-            # that a page contains exactly one matching element.  The attacker
-            # may legitimately add another dashboard section before the victim
-            # logs in, making common selectors such as `.there-are-items`
-            # plural.  Keep fill/click strict, but accept the first visible
-            # matching element for an explicit `assert_visible` login step.
-            page.locator(step.selector).first.wait_for(state="visible")
+        mark_step(f"{prefix}.{kind}", index)
+        try:
+            if kind == "goto":
+                page.goto(urljoin(base_url, step.path), wait_until="domcontentloaded")
+            elif kind == "fill":
+                page.locator(step.selector).fill(account["username" if step.value == "{{username}}" else "password"])
+            elif kind == "click":
+                page.locator(step.selector).click()
+            else:
+                # A visibility assertion is an existence check, not an assertion
+                # that a page contains exactly one matching element.  The attacker
+                # may legitimately add another dashboard section before the victim
+                # logs in, making common selectors such as `.there-are-items`
+                # plural.  Keep fill/click strict, but accept the first visible
+                # matching element for an explicit `assert_visible` login step.
+                page.locator(step.selector).first.wait_for(state="visible")
+        except Exception as exc:
+            if type(exc).__name__ == "TimeoutError":
+                raise StepTimeout(f"{prefix}.{kind}", 0, index) from exc
+            raise
+        mark_step(f"{prefix}.origin", index)
         if _origin_of(page.url) != _origin_of(base_url):
             raise ReceiptError("登录跳转超出目标来源")
     return True
@@ -135,12 +142,15 @@ def _login_cookie_header(
     http_credentials: dict[str, str] | None = None,
 ) -> str | AttackerSession:
     """为受信任路径中的攻击者身份建立一次短暂的浏览器 Cookie 会话。"""
+    if not browser_runs_inprocess():
+        return _login_cookie_header_bounded(base_url, steps, account, timeout_ms, auth_headers, http_credentials)
     try:
         from playwright.sync_api import sync_playwright
         from app.receipt import _chromium_launch_options
     except ImportError as exc:
         raise ReceiptError("攻击者登录浏览器不可用") from exc
     with sync_playwright() as playwright:
+        mark_step("attacker_login.launch")
         browser = playwright.chromium.launch(**_chromium_launch_options(playwright.chromium.executable_path))
         try:
             context_options: dict[str, Any] = {}
@@ -150,12 +160,14 @@ def _login_cookie_header(
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
             _login(page, base_url, steps, account)
+            mark_step("attacker_login.cookies")
             cookies = context.cookies(base_url)
             cookie = "; ".join(f"{item['name']}={item['value']}" for item in cookies)
             if not auth_headers:
                 return cookie
             headers = {}
             for item in auth_headers:
+                mark_step("attacker_login.storage")
                 value = page.evaluate("([source, key]) => window[source].getItem(key)", [item.source, item.key])
                 if not isinstance(value, str) or not value or len(value) > 8192 or any(ord(c) < 32 or ord(c) > 126 for c in value):
                     raise AttackerAuthMissing("声明的认证材料不存在或无效")
@@ -163,9 +175,48 @@ def _login_cookie_header(
             return AttackerSession(cookie, headers)
         finally:
             try:
+                mark_step("attacker_login.close")
                 browser.close()
             except Exception as exc:
                 diagnostics.record("attacker_browser_close", error=f"{type(exc).__name__}: {exc}")
+
+
+def _login_cookie_header_bounded(
+    base_url: str,
+    steps: tuple[LoginStep, ...],
+    account: dict[str, str],
+    timeout_ms: int,
+    auth_headers: tuple[AuthHeader, ...],
+    http_credentials: dict[str, str] | None,
+) -> str | AttackerSession:
+    result = run_browser_job(
+        {
+            "op": "attacker_login",
+            "base_url": base_url,
+            "steps": [{"type": step.type, "path": step.path, "selector": step.selector, "value": step.value} for step in steps],
+            "account": account,
+            "timeout_ms": timeout_ms,
+            "auth_headers": [
+                {"source": item.source, "key": item.key, "header": item.header, "prefix": item.prefix}
+                for item in auth_headers
+            ],
+            "http_credentials": http_credentials,
+        },
+        timeout_ms,
+    )
+    if result.get("timeout"):
+        index = result.get("index")
+        raise StepTimeout(str(result.get("step") or "attacker_login"), float(result.get("timeout_seconds") or 1), index if type(index) is int else None)
+    if result.get("kind") == "cookie":
+        return str(result.get("cookie") or "")
+    if result.get("kind") == "session":
+        headers = result.get("headers")
+        if not isinstance(headers, dict):
+            raise ReceiptError("攻击者登录浏览器不可用")
+        return AttackerSession(str(result.get("cookie") or ""), {str(key): str(value) for key, value in headers.items()})
+    if result.get("error") == "AttackerAuthMissing":
+        raise AttackerAuthMissing("声明的认证材料不存在或无效")
+    raise ReceiptError("攻击者登录浏览器不可用")
 
 
 class GenericComposeAdapter:
@@ -257,6 +308,7 @@ class GenericComposeAdapter:
                     victim_http_credentials=page_http_credentials(
                         manifest.browser_http_auth, account_for(path.victim_principal)
                     ),
+                    victim_account=account_for(path.victim_principal),
                 )
             finally:
                 # 清理异常若继续抛出，会盖住 with 块里已经返回的路径结论，

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from app import receipt_diagnostics as diagnostics
 from app.generic_receipt_adapter import _run
+from app.process_bounds import StepTimeout
 from app.receipt import ReceiptError, ReceiptVerifier, ReceiptVerdict
 from app.receipt_execution import receipt_agent_feedback
 from test_receipt import _Adapter, _Attacker, _Browser, _candidate, _manifest
@@ -22,7 +23,7 @@ class ReceiptDiagnosticsTests(unittest.TestCase):
             try:
                 diagnostics.add_secrets("private-value")
                 failure = subprocess.CompletedProcess([], 17, "", "connection refused\nprivate-value\npassword=abc")
-                with patch("app.generic_receipt_adapter.subprocess.run", return_value=failure):
+                with patch("app.generic_receipt_adapter.run_bounded", return_value=failure):
                     with self.assertRaisesRegex(ReceiptError, "退出码 17"):
                         _run(["python", "start.py"], root, {"RECEIPT_RUN_ID": "abc"}, 30)
                 entry = json.loads((root / "receipt" / "diagnostics.jsonl").read_text(encoding="utf-8"))
@@ -56,11 +57,12 @@ class ReceiptDiagnosticsTests(unittest.TestCase):
             root = Path(raw)
             tokens = diagnostics.begin(root)
             try:
-                with patch("app.generic_receipt_adapter.subprocess.run", side_effect=subprocess.TimeoutExpired("start", 12)):
+                with patch("app.generic_receipt_adapter.run_bounded", side_effect=StepTimeout("python start.py", 12)):
                     with self.assertRaisesRegex(ReceiptError, "超时（12 秒）"):
                         _run(["python", "start.py"], root, {"RECEIPT_RUN_ID": "abc"}, 12)
                 entry = json.loads((root / "receipt" / "diagnostics.jsonl").read_text(encoding="utf-8"))
                 self.assertEqual(entry["timeout_seconds"], 12)
-                self.assertIn("TimeoutExpired", entry["error"])
+                self.assertEqual(entry["step"], "python start.py")
+                self.assertIn("StepTimeout", entry["error"])
             finally:
                 diagnostics.end(tokens)

@@ -148,7 +148,7 @@ def run(ctx):
 - `marker` 不能与其他候选项重复。同一 `poc_id` 再次提交可以沿用自己的 `marker`。
 - 脚本可读取 `ctx.receipt_token`，把本轮 token 写入待触发的载荷。声明了 `callback_json` 时，还可以读取 `ctx.callback_origin`，把它写入目标配置；不要把回连地址写成字符串常量。
 - `attacker_login` 和 `victim.login` 均可省略；省略即以匿名会话执行。攻击者请求需要登录时必须写出 `attacker_login`：仅允许 `goto`、`fill`、`click`、`assert_visible`，首步必须是站内相对路径的 `goto`，末步必须是 `assert_visible`，且必须各有一次 `{{username}}` 与 `{{password}}` 的 `fill`。验证器把可信威胁路径中的账号代入这些步骤。脚本继续用 `ctx.request` 访问业务接口，会话 Cookie 和声明的认证头由库自动附带。`ctx.username` 和 `ctx.password` 在重放中为空，不能用来登录。Agent 不得指定身份、账号或 Cookie。
-- `victim.url` 必须是站内相对 URL。`actions` 只允许 `click`、`fill`、`select`、`scroll`、`wait`；只能使用 CSS selector，不能执行任意 JavaScript。URL 及 `fill` / `select` 的 `value` 可写 `{{receipt_token}}`，由验证器在每次重放时替换。
+- `victim.url` 必须是站内相对 URL。`actions` 只允许 `click`、`fill`、`select`、`scroll`、`wait`；只能使用 CSS selector，不能执行任意 JavaScript。`click`、`fill`、`select`、`scroll` 的选择器必须只命中一个元素。目标是重复条目时，选择器必须落到包含本次 marker 的那一条，再点击其中的按钮。URL 及 `fill` / `select` 的 `value` 可写 `{{receipt_token}}`，由验证器在每次重放时替换。
 - `victim.url` 和受害者登录的 `goto.path` 不得包含认证或会话查询参数；受害者身份由验证器建立。
 - XSS 载荷必须在受害者页面实际执行的位置调用 `window.__receipt_accept(token)`。`token` 来自攻击脚本的 `ctx.receipt_token`，或经 `{{receipt_token}}` 注入受害者 URL/动作；不要自行生成或硬编码 token。
 - 不得提交或猜测攻击者/受害者身份、威胁路径、账号、密码、Cookie、浏览器调试端口、CDP 地址或回连主机名。回连响应只放在 `callback_json`，主机名只能读取 `ctx.callback_origin`。身份和地址由验证器的可信 Manifest 和 Adapter 决定。

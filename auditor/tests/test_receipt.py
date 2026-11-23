@@ -199,6 +199,8 @@ class PlaywrightDiagnosticsTests(unittest.TestCase):
                 class Context:
                     def route(self, *args): pass
                     def route_web_socket(self, *args): pass
+                    def expose_binding(self, *args): pass
+                    def add_init_script(self, *args): pass
                     def new_page(self): return Page()
                     def cookies(self): return []
 
@@ -244,20 +246,15 @@ class PlaywrightDiagnosticsTests(unittest.TestCase):
         class Page:
             url = "http://target.test/view"
 
-            def __init__(self) -> None:
+            def __init__(self, context) -> None:
+                self.context = context
                 self.main_frame = self
-
-            def expose_binding(self, name, callback) -> None:
-                self.callback = callback
-
-            def add_init_script(self, *args) -> None:
-                pass
 
             def set_default_timeout(self, *args) -> None:
                 pass
 
             def goto(self, *args, **kwargs):
-                self.callback({"page": self, "frame": self}, secret)
+                self.context.callback({"page": self, "frame": self}, secret)
                 return types.SimpleNamespace(status=200)
 
             def locator(self, *args):
@@ -283,8 +280,15 @@ class PlaywrightDiagnosticsTests(unittest.TestCase):
             def route_web_socket(self, *args) -> None:
                 pass
 
+            def expose_binding(self, name, callback) -> None:
+                del name
+                self.callback = callback
+
+            def add_init_script(self, *args) -> None:
+                pass
+
             def new_page(self):
-                return Page()
+                return Page(self)
 
         class Chromium:
             executable_path = "chromium"
@@ -608,20 +612,15 @@ class ReceiptModelTests(unittest.TestCase):
             url = "http://target.test/view"
             main_frame = None
 
-            def __init__(self) -> None:
+            def __init__(self, context) -> None:
+                self.context = context
                 self.main_frame = self
-
-            def expose_binding(self, name, callback) -> None:
-                self.callback = callback
-
-            def add_init_script(self, *args) -> None:
-                pass
 
             def set_default_timeout(self, *args) -> None:
                 pass
 
             def goto(self, *args, **kwargs):
-                self.callback({"page": self, "frame": self}, "receipt-token")
+                self.context.callback({"page": self, "frame": self}, "receipt-token")
                 return types.SimpleNamespace(status=200)
 
             def locator(self, *args):
@@ -640,8 +639,15 @@ class ReceiptModelTests(unittest.TestCase):
             def route_web_socket(self, *args) -> None:
                 pass
 
+            def expose_binding(self, name, callback) -> None:
+                del name
+                self.callback = callback
+
+            def add_init_script(self, *args) -> None:
+                pass
+
             def new_page(self):
-                return Page()
+                return Page(self)
 
         class Browser:
             def new_context(self, **kwargs):
@@ -694,22 +700,16 @@ class ReceiptModelTests(unittest.TestCase):
             class Page:
                 url = "http://target.test/view"
 
-                def __init__(self) -> None:
+                def __init__(self, context) -> None:
+                    self.context = context
                     self.main_frame = self
-
-                def expose_binding(self, name, callback) -> None:
-                    del name
-                    self.callback = callback
-
-                def add_init_script(self, *args) -> None:
-                    del args
 
                 def set_default_timeout(self, *args) -> None:
                     del args
 
                 def goto(self, *args, **kwargs):
                     del args, kwargs
-                    self.callback({"page": self, "frame": self}, secret)
+                    self.context.callback({"page": self, "frame": self}, secret)
                     return types.SimpleNamespace(status=200)
 
                 def locator(self, *args):
@@ -732,8 +732,15 @@ class ReceiptModelTests(unittest.TestCase):
                 def route_web_socket(self, *args) -> None:
                     del args
 
+                def expose_binding(self, name, callback) -> None:
+                    del name
+                    self.callback = callback
+
+                def add_init_script(self, *args) -> None:
+                    del args
+
                 def new_page(self) -> Page:
-                    return Page()
+                    return Page(self)
 
                 def cookies(self) -> list[dict[str, str]]:
                     jar = jars[min(self.reads, len(jars) - 1)]
@@ -1764,3 +1771,441 @@ class CallbackFixtureTests(unittest.TestCase):
             }))
         self.assertTrue(rejected["is_error"])
         self.assertIn("callback", rejected["content"][0]["text"])
+
+
+class ReceiptRepairTests(unittest.TestCase):
+    def test_candidate_keeps_the_task_base_url_out_of_the_submitted_mapping(self) -> None:
+        candidate = _candidate()
+        self.assertEqual(candidate.validated_base_url, "http://127.0.0.1:9/")
+        self.assertNotIn("validated_base_url", candidate.as_mapping())
+        rebuilt = ReceiptCandidate.from_mapping(candidate.as_mapping(), base_url=candidate.validated_base_url)
+        self.assertEqual(rebuilt.source_hash, candidate.source_hash)
+        with self.assertRaises(ReceiptError):
+            ReceiptCandidate.from_mapping(candidate.as_mapping(), base_url="http://127.0.0.1:8904/")
+
+    def test_worker_rejects_the_ephemeral_port_and_navigates_with_it(self) -> None:
+        from app.browser_worker import _victim
+        from app.receipt import _evidence_from_worker
+
+        invalid = _victim(self._job("http://127.0.0.1:8904/"))
+        self.assertEqual(invalid, {"failed": True, "error": "CANDIDATE_INVALID"})
+        self.assertEqual(_evidence_from_worker(invalid, run_id="run").reason, "RECEIPT_BUNDLE_INVALID")
+
+        seen: dict[str, str] = {}
+
+        class Driver:
+            def run(self, candidate, target, path, token, timeout_ms):
+                del path, token, timeout_ms
+                seen["validated"] = candidate.validated_base_url
+                seen["base"] = target.base_url
+                return BrowserEvidence(True, "BROWSER_BOUND_RECEIPT", target.base_url)
+
+        with patch("app.receipt.PlaywrightVictimDriver", Driver):
+            accepted = _victim(self._job("http://127.0.0.1:9/"))
+        self.assertEqual(seen, {"validated": "http://127.0.0.1:9/", "base": "http://127.0.0.1:8904/"})
+        self.assertEqual(accepted["reason"], "BROWSER_BOUND_RECEIPT")
+
+    def test_worker_failure_records_the_category_without_the_exception_text(self) -> None:
+        from app import receipt_diagnostics as diagnostics
+        from app.receipt import _evidence_from_worker
+
+        secret = "password-in-worker-crash"
+        with tempfile.TemporaryDirectory() as directory:
+            tokens = diagnostics.begin(Path(directory))
+            try:
+                evidence = _evidence_from_worker(
+                    {"failed": True, "error": "RuntimeError", "step": "browser_launch", "error_message": secret},
+                    run_id="run",
+                )
+            finally:
+                diagnostics.end(tokens)
+            text = (Path(directory) / "receipt" / "diagnostics.jsonl").read_text(encoding="utf-8")
+        self.assertEqual(evidence.reason, "BROWSER_UNAVAILABLE")
+        self.assertIn("RuntimeError", text)
+        self.assertIn("browser_launch", text)
+        self.assertNotIn(secret, text)
+
+    def test_bundle_revalidation_stays_indeterminate(self) -> None:
+        class BundleBrowser:
+            def run(self, *args):
+                del args
+                return BrowserEvidence(False, "RECEIPT_BUNDLE_INVALID")
+
+        result = ReceiptVerifier(
+            adapter=_Adapter(), attacker=_Attacker(), browser=BundleBrowser(), receipt_key=b"k" * 32,
+        ).verify(_candidate(), _manifest(extension_path_budget=0))
+        self.assertEqual(result.verdict, ReceiptVerdict.INDETERMINATE)
+        self.assertEqual(result.primary.reason, "RECEIPT_BUNDLE_INVALID")
+
+    def _job(self, validation_base: str) -> dict:
+        return {
+            "candidate": _candidate().as_mapping(),
+            "base_url": "http://127.0.0.1:8904/",
+            "validation_base_url": validation_base,
+            "path": {
+                "id": "author-to-admin",
+                "attacker_principal": "author-1",
+                "victim_principal": "admin-1",
+                "primary": True,
+            },
+            "allowed_origins": ["http://127.0.0.1:8904"],
+            "victim_account": {},
+            "run_id": "run",
+            "token": "token",
+            "timeout_ms": 1000,
+        }
+
+    def test_popup_receipt_accepts_only_an_allowed_main_frame(self) -> None:
+        secret = "receipt-token"
+        calls: dict[str, object] = {}
+
+        class ChildFrame:
+            pass
+
+        class Page:
+            def __init__(self, url: str, origin: str | None = None) -> None:
+                self.url = url
+                self.main_frame = self
+                self.origin = origin
+
+            def evaluate(self, script: str):
+                del script
+                if self.origin is None:
+                    raise RuntimeError("origin unavailable")
+                return self.origin
+
+            def set_default_timeout(self, timeout: int) -> None:
+                del timeout
+                calls["callback"]({"page": self, "frame": self}, secret)
+
+            def goto(self, *args, **kwargs):
+                del args, kwargs
+                return types.SimpleNamespace(status=200)
+
+            def locator(self, selector: str):
+                del selector
+                return self
+
+            def click(self) -> None:
+                popup = Page("javascript:window.__receipt_accept('token')", "http://target.test")
+                foreign = Page("http://evil.test/open")
+                calls["callback"]({"page": self, "frame": ChildFrame()}, secret)
+                calls["callback"]({"page": foreign, "frame": foreign}, secret)
+                calls["callback"]({"page": popup, "frame": popup}, secret)
+
+            def wait_for_timeout(self, timeout: int) -> None:
+                del timeout
+
+        class Context:
+            def route(self, *args) -> None:
+                del args
+
+            def route_web_socket(self, *args) -> None:
+                del args
+
+            def expose_binding(self, name, callback) -> None:
+                del name
+                calls["callback"] = callback
+
+            def add_init_script(self, script: str) -> None:
+                calls["script"] = script
+
+            def new_page(self) -> Page:
+                return Page("http://target.test/view")
+
+        class Browser:
+            def new_context(self, **kwargs):
+                del kwargs
+                return Context()
+
+            def close(self) -> None:
+                return None
+
+        class Chromium:
+            executable_path = "chromium"
+
+            def launch(self, **kwargs):
+                del kwargs
+                return Browser()
+
+        class Playwright:
+            chromium = Chromium()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args) -> None:
+                return None
+
+        api = types.ModuleType("playwright.sync_api")
+        api.sync_playwright = Playwright
+        api.Error = Exception
+        api.TimeoutError = Exception
+        package = types.ModuleType("playwright")
+        package.sync_api = api
+        manifest = _manifest(extension_path_budget=0)
+        with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            with patch.dict(sys.modules, {"playwright": package, "playwright.sync_api": api}):
+                evidence = PlaywrightVictimDriver().run(_candidate(), target, manifest.primary_path, secret, 1000)
+        self.assertTrue(evidence.accepted)
+        self.assertEqual(evidence.document_origin, "http://target.test")
+        self.assertIn("__receipt_accept", str(calls["script"]))
+        self.assertNotIn(secret, repr(evidence))
+
+    def test_receipt_before_recording_is_ignored(self) -> None:
+        secret = "receipt-token"
+        holder: dict[str, object] = {}
+
+        class Page:
+            url = "http://target.test/view"
+            main_frame = None
+
+            def __init__(self) -> None:
+                self.main_frame = self
+
+            def set_default_timeout(self, timeout: int) -> None:
+                del timeout
+                holder["callback"]({"page": self, "frame": self}, secret)
+
+            def goto(self, *args, **kwargs):
+                del args, kwargs
+                return types.SimpleNamespace(status=200)
+
+            def locator(self, selector: str):
+                del selector
+                return self
+
+            def click(self) -> None:
+                return None
+
+            def wait_for_timeout(self, timeout: int) -> None:
+                del timeout
+
+        class Context:
+            def route(self, *args) -> None:
+                del args
+
+            def route_web_socket(self, *args) -> None:
+                del args
+
+            def expose_binding(self, name, callback) -> None:
+                del name
+                holder["callback"] = callback
+
+            def add_init_script(self, script: str) -> None:
+                del script
+
+            def new_page(self) -> Page:
+                return Page()
+
+        class Browser:
+            def new_context(self, **kwargs):
+                del kwargs
+                return Context()
+
+            def close(self) -> None:
+                return None
+
+        class Chromium:
+            executable_path = "chromium"
+
+            def launch(self, **kwargs):
+                del kwargs
+                return Browser()
+
+        class Playwright:
+            chromium = Chromium()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args) -> None:
+                return None
+
+        api = types.ModuleType("playwright.sync_api")
+        api.sync_playwright = Playwright
+        api.Error = Exception
+        api.TimeoutError = Exception
+        package = types.ModuleType("playwright")
+        package.sync_api = api
+        manifest = _manifest(extension_path_budget=0)
+        with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            with patch.dict(sys.modules, {"playwright": package, "playwright.sync_api": api}):
+                evidence = PlaywrightVictimDriver().run(_candidate(), target, manifest.primary_path, secret, 200)
+        self.assertFalse(evidence.accepted)
+        self.assertEqual(evidence.reason, "NO_BROWSER_BOUND_RECEIPT")
+
+    def test_ambiguous_selector_rejects_without_returning_the_selector(self) -> None:
+        from app.receipt_execution import receipt_agent_feedback
+
+        secret = "#secret-marker-button"
+
+        class FakeError(Exception):
+            pass
+
+        class FakeTimeout(FakeError):
+            pass
+
+        class Page:
+            url = "http://target.test/view"
+
+            def __init__(self) -> None:
+                self.main_frame = self
+
+            def set_default_timeout(self, timeout: int) -> None:
+                del timeout
+
+            def goto(self, *args, **kwargs):
+                del args, kwargs
+                return types.SimpleNamespace(status=200)
+
+            def locator(self, selector: str):
+                del selector
+
+                def click() -> None:
+                    raise FakeError(f'strict mode violation: locator("{secret}") resolved to 2 elements')
+
+                return types.SimpleNamespace(click=click)
+
+            def wait_for_timeout(self, timeout: int) -> None:
+                del timeout
+
+        class Context:
+            def route(self, *args) -> None:
+                del args
+
+            def route_web_socket(self, *args) -> None:
+                del args
+
+            def expose_binding(self, *args) -> None:
+                del args
+
+            def add_init_script(self, *args) -> None:
+                del args
+
+            def new_page(self) -> Page:
+                return Page()
+
+        class Browser:
+            def new_context(self, **kwargs):
+                del kwargs
+                return Context()
+
+            def close(self) -> None:
+                return None
+
+        class Chromium:
+            executable_path = "chromium"
+
+            def launch(self, **kwargs):
+                del kwargs
+                return Browser()
+
+        class Playwright:
+            chromium = Chromium()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args) -> None:
+                return None
+
+        api = types.ModuleType("playwright.sync_api")
+        api.sync_playwright = Playwright
+        api.Error = FakeError
+        api.TimeoutError = FakeTimeout
+        package = types.ModuleType("playwright")
+        package.sync_api = api
+        manifest = _manifest(extension_path_budget=0)
+        with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            with patch.dict(sys.modules, {"playwright": package, "playwright.sync_api": api}):
+                evidence = PlaywrightVictimDriver().run(_candidate(), target, manifest.primary_path, "receipt-token", 1000)
+        self.assertEqual(evidence.reason, "BROWSER_ERROR")
+        self.assertEqual(evidence.error_type, "playwright_error")
+        self.assertEqual(evidence.error_stage, "victim_action")
+        self.assertEqual(evidence.click_blocker, "ambiguous")
+        self.assertNotIn(secret, repr(evidence))
+
+        class AmbiguousBrowser:
+            def run(self, *args):
+                del args
+                return evidence
+
+        result = ReceiptVerifier(
+            adapter=_Adapter(), attacker=_Attacker(), browser=AmbiguousBrowser(), receipt_key=b"k" * 32,
+        ).verify(_candidate(), manifest)
+        self.assertEqual(result.verdict, ReceiptVerdict.REJECTED)
+        feedback = receipt_agent_feedback("001-receipt-xss", result)
+        self.assertEqual(feedback["verdict"], "REJECTED")
+        self.assertIn("index: 0", feedback["reason_description"])
+        self.assertNotIn(secret, str(feedback))
+
+    def test_live_popup_receipt_for_same_origin_and_javascript_urls(self) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        token = "live-receipt-token"
+        popup = "<!doctype html><script>window.__receipt_accept('%s')</script>" % token
+        page = """<!doctype html>
+<button id="http">http</button>
+<button id="js">js</button>
+<script>
+document.getElementById('http').onclick = () => window.open('/popup', '_blank', 'noopener,noreferrer');
+document.getElementById('js').onclick = () => window.open('javascript:void(window.__receipt_accept("%s"))', '_blank', 'noopener,noreferrer');
+</script>""" % token
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                body = popup if self.path.startswith("/popup") else page
+                data = body.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, format: str, *args) -> None:
+                del format, args
+
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        del sync_playwright
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            origin = f"http://127.0.0.1:{port}"
+            http_result = self._live_receipt(origin, "#http", token)
+            script_result = self._live_receipt(origin, "#js", token)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+        if http_result.reason == "BROWSER_UNAVAILABLE":
+            self.skipTest("chromium is not available")
+        self.assertTrue(http_result.accepted, http_result.reason)
+        self.assertEqual(http_result.document_origin, origin)
+        # Chromium does not run the context init script for a javascript: popup opened with noopener.
+        self.assertFalse(script_result.accepted)
+        self.assertEqual(script_result.reason, "NO_BROWSER_BOUND_RECEIPT")
+
+    def _live_receipt(self, origin: str, selector: str, token: str) -> BrowserEvidence:
+        from app.receipt import ThreatPath, VictimAction
+
+        candidate = replace(_candidate(), victim_url="/", victim_actions=(VictimAction("click", selector),))
+        path = ThreatPath("author-to-admin", "author-1", "admin-1", True, False)
+        target = TargetRun(
+            run_id="live",
+            base_url=origin + "/",
+            attacker_base_url=origin + "/",
+            allowed_origins=(origin,),
+            attacker_network="",
+            attacker_cookie_header="",
+            login_victim=lambda *args: True,
+            snapshot_id="live",
+        )
+        with patch("app.receipt.browser_runs_inprocess", return_value=True):
+            return PlaywrightVictimDriver().run(candidate, target, path, token, 2000)
+

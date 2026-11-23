@@ -44,7 +44,7 @@ def redact(value: object) -> str:
 
 
 def record(stage: str, *, run_id: str = "", error: object = "", **details: object) -> None:
-    _last.set({"stage": stage, **{key: value for key, value in details.items() if key in {"exit_code", "timeout_seconds", "operation"}}})
+    _last.set({"stage": stage, **{key: value for key, value in details.items() if key in {"exit_code", "timeout_seconds", "operation", "step", "index"}}})
     destination = _destination.get()
     if destination is None:
         return
