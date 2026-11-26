@@ -51,16 +51,10 @@ class ReceiptVerdict(StrEnum):
 
 
 @dataclass(frozen=True)
-class Principal:
-    id: str
-    account_id: str
-
-
-@dataclass(frozen=True)
 class ThreatPath:
     id: str
-    attacker_principal: str
-    victim_principal: str
+    attacker_account: str
+    victim_account: str
     accept_self_xss: bool = False
 
 
@@ -73,7 +67,6 @@ class TargetManifest:
     image_digest: str
     adapter: str
     allowed_origins: tuple[str, ...]
-    principals: dict[str, Principal]
     threat_paths: tuple[ThreatPath, ...]
     browser_timeout_ms: int = 15_000
     manifest_hash: str = ""
@@ -92,39 +85,33 @@ class TargetManifest:
             raise ReceiptError("allowed_origins 必须是非空数组")
         origins = tuple(_normalize_origin(_string(value, "allowed_origins")) for value in origins_raw)
 
-        principals: dict[str, Principal] = {}
-        for item in _list(raw.get("principals"), "principals"):
-            principal = _mapping(item, "principals[]")
-            _only_fields(principal, {"id", "account_id"}, "principals[]")
-            principal_id = _identifier(principal.get("id"), "principal.id")
-            if principal_id in principals:
-                raise ReceiptError(f"principal.id 重复：{principal_id}")
-            principals[principal_id] = Principal(
-                id=principal_id,
-                account_id=_identifier(principal.get("account_id", principal_id), "principal.account_id"),
-            )
+        if "principals" in raw:
+            raise ReceiptError("Manifest 不再支持 principals，请使用账号计划")
 
         paths: list[ThreatPath] = []
         seen_paths: set[str] = set()
         for item in _list(raw.get("threat_paths"), "threat_paths"):
             path = _mapping(item, "threat_paths[]")
+            if "attacker_principal" in path or "victim_principal" in path:
+                raise ReceiptError("威胁路径不再支持 principal 字段，请使用 account 字段")
             path_id = _identifier(path.get("id"), "threat_path.id")
             if path_id in seen_paths:
                 raise ReceiptError(f"threat_path.id 重复：{path_id}")
             seen_paths.add(path_id)
-            attacker = _identifier(path.get("attacker_principal"), "attacker_principal")
-            victim = _identifier(path.get("victim_principal"), "victim_principal")
-            if attacker not in principals or victim not in principals:
-                raise ReceiptError(f"路径 {path_id} 引用了未知 principal")
-            self_xss = principals[attacker].account_id == principals[victim].account_id
-            if self_xss and not bool(path.get("accept_self_xss", False)):
+            attacker = _identifier(path.get("attacker_account"), "attacker_account")
+            victim = _identifier(path.get("victim_account"), "victim_account")
+            accept_self_xss = path.get("accept_self_xss", False)
+            if not isinstance(accept_self_xss, bool):
+                raise ReceiptError("accept_self_xss 必须是布尔值")
+            self_xss = attacker == victim
+            if self_xss and not accept_self_xss:
                 raise ReceiptError(f"路径 {path_id} 是 self-XSS，必须显式 accept_self_xss")
             paths.append(
                 ThreatPath(
                     id=path_id,
-                    attacker_principal=attacker,
-                    victim_principal=victim,
-                    accept_self_xss=bool(path.get("accept_self_xss", False)),
+                    attacker_account=attacker,
+                    victim_account=victim,
+                    accept_self_xss=accept_self_xss,
                 )
             )
         if not paths:
@@ -147,7 +134,6 @@ class TargetManifest:
             image_digest=image_digest,
             adapter=adapter,
             allowed_origins=origins,
-            principals=principals,
             threat_paths=tuple(paths),
             browser_timeout_ms=timeout,
             manifest_hash=hashlib.sha256(canonical).hexdigest(),
@@ -945,8 +931,8 @@ def _victim_browser_bounded(
             "validation_base_url": candidate.validated_base_url,
             "path": {
                 "id": path.id,
-                "attacker_principal": path.attacker_principal,
-                "victim_principal": path.victim_principal,
+                "attacker_account": path.attacker_account,
+                "victim_account": path.victim_account,
                 "accept_self_xss": path.accept_self_xss,
             },
             "allowed_origins": list(target.allowed_origins),
@@ -1139,7 +1125,7 @@ class PlaywrightVictimDriver:
                 stage = "victim_login"
                 mark_step(stage)
                 session_before = None
-                if candidate.victim_login and not target.login_victim(page, path.victim_principal, candidate.victim_login):
+                if candidate.victim_login and not target.login_victim(page, path.victim_account, candidate.victim_login):
                     outcome = BrowserEvidence(False, "VICTIM_LOGIN_FAILED")
                     publish(outcome)
                     stage = "browser_close"
@@ -1208,8 +1194,8 @@ class PathResult:
     reason: str
     run_id: str = ""
     evidence: dict[str, Any] = field(default_factory=dict)
-    attacker_principal: str = ""
-    victim_principal: str = ""
+    attacker_account: str = ""
+    victim_account: str = ""
     accept_self_xss: bool = False
 
 
@@ -1290,8 +1276,8 @@ class ReceiptVerifier:
             report_progress()
         def bind_path(result: PathResult) -> PathResult:
             path = paths_by_id[result.path_id]
-            return replace(result, attacker_principal=path.attacker_principal,
-                           victim_principal=path.victim_principal, accept_self_xss=path.accept_self_xss)
+            return replace(result, attacker_account=path.attacker_account,
+                           victim_account=path.victim_account, accept_self_xss=path.accept_self_xss)
 
         ordered = [bind_path(results[path.id]) for path in manifest.threat_paths]
         payload = {
@@ -1615,7 +1601,7 @@ def _chromium_launch_options(default_path: str) -> dict[str, Any]:
 
 def _path_result_mapping(result: PathResult) -> dict[str, Any]:
     return {"path_id": result.path_id, "verdict": result.verdict.value, "reason": result.reason, "run_id": result.run_id, "evidence": result.evidence,
-            "attacker_principal": result.attacker_principal, "victim_principal": result.victim_principal,
+            "attacker_account": result.attacker_account, "victim_account": result.victim_account,
             "accept_self_xss": result.accept_self_xss}
 
 

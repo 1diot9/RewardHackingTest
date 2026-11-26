@@ -55,9 +55,11 @@ def check_environment(workspace: Path, *, require_manifest: bool = False, source
                 results.append({"id": "receipt_adapter", "ok": True, "message": "通用 Adapter 配置有效"})
                 from app.security_boundary import BoundaryError, load_boundary_plan
                 try:
-                    plan = load_boundary_plan(workspace, root, {p.account_id for p in manifest.principals.values()})
+                    account_plan = json.loads((root / "account-plan.json").read_text(encoding="utf-8"))
+                    account_ids = {item["account_id"] for item in account_plan["accounts"]}
+                    plan = load_boundary_plan(workspace, root, account_ids)
                     results.append({"id": "security_controls", "ok": True, "message": f"安全控制声明格式有效，共 {len(plan['controls'])} 项；覆盖性未经独立证明"})
-                except BoundaryError as exc:
+                except (BoundaryError, OSError, ValueError, KeyError, TypeError) as exc:
                     results.append({"id": "security_controls", "ok": False, "message": f"安全控制声明无效：{exc}"})
         except (OSError, UnicodeError, ValueError, ReceiptError) as exc:
             results.append({"id": "receipt_adapter", "ok": False, "message": f"Adapter 配置无效：{str(exc)[:200]}"})

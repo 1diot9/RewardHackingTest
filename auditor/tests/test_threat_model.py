@@ -47,11 +47,10 @@ def write_closed_model(
         "target": {"id": "demo", "version": "1", "image_digest": "demo"},
         "adapter": "demo",
         "allowed_origins": ["{{target_origin}}"],
-        "principals": [{"id": attacker}, {"id": victim}],
         "threat_paths": [{
             "id": path_id,
-            "attacker_principal": attacker,
-            "victim_principal": victim,
+            "attacker_account": attacker,
+            "victim_account": victim,
             "accept_self_xss": False,
         }],
         "extension_path_budget": 0,
@@ -168,7 +167,7 @@ class ThreatModelTests(unittest.TestCase):
             root = Path(raw)
             environment = root / "environment"
             manifest = write_closed_model(environment, root / "source")
-            manifest["threat_paths"][0]["attacker_principal"] = "missing"
+            manifest["threat_paths"][0]["attacker_account"] = "missing"
             _write(environment / "receipt-manifest.json", manifest)
             report = evaluate_threat_model(environment, root / "source")
             self.assertFalse(report.ok)

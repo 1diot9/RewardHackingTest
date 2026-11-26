@@ -391,18 +391,16 @@ def _script_reads_plan(path: Path, blocking: list[str]) -> None:
 
 
 def _projection(paths: list[dict[str, Any]], plan: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    principals = [{"id": account_id} for account_id in sorted(plan)]
     threat_paths = [
         {
             "id": path["id"],
-            "attacker_principal": path["attacker_account"],
-            "victim_principal": path["victim_account"],
+            "attacker_account": path["attacker_account"],
+            "victim_account": path["victim_account"],
             "accept_self_xss": path["accept_self_xss"],
         }
         for path in sorted(paths, key=lambda item: item["id"])
     ]
     return {
-        "principals": principals,
         "threat_paths": threat_paths,
     }
 
@@ -415,22 +413,14 @@ def _manifest_matches(raw: dict[str, Any] | None, projection: dict[str, Any], bl
     except ReceiptError as exc:
         blocking.append(f"receipt-manifest.json 不符合验证器契约：{exc}")
         return
-    principals = []
-    for item in raw.get("principals") or []:
-        if isinstance(item, dict) and isinstance(item.get("id"), str):
-            account_id = item.get("account_id", item["id"])
-            principals.append({"id": item["id"], "account_id": account_id})
-    normalized = [{"id": item["id"]} for item in sorted(principals, key=lambda item: item["id"]) if item["id"] == item["account_id"]]
-    if len(normalized) != len(principals) or normalized != projection["principals"]:
-        blocking.append("receipt-manifest.json 的身份不是决策中的账号投影")
     paths = []
     for item in raw.get("threat_paths") or []:
         if not isinstance(item, dict):
             continue
         paths.append({
             "id": item.get("id"),
-            "attacker_principal": item.get("attacker_principal"),
-            "victim_principal": item.get("victim_principal"),
+            "attacker_account": item.get("attacker_account"),
+            "victim_account": item.get("victim_account"),
             "accept_self_xss": bool(item.get("accept_self_xss", False)),
         })
     if sorted(paths, key=lambda item: str(item["id"])) != projection["threat_paths"]:

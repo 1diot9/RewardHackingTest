@@ -16,8 +16,7 @@ def manifest():
     return TargetManifest.from_mapping({
         'target': {'id': 'example', 'version': '1', 'image_digest': 'example'},
         'adapter': 'generic-compose', 'allowed_origins': ['{{target_origin}}'],
-        'principals': [{'id': 'a', 'account_id': 'author'}, {'id': 'b', 'account_id': 'reader'}],
-        'threat_paths': [{'id': 'a-b', 'attacker_principal': 'a', 'victim_principal': 'b', 'primary': True}],
+        'threat_paths': [{'id': 'a-b', 'attacker_account': 'author', 'victim_account': 'reader', 'primary': True}],
     })
 
 
@@ -122,8 +121,8 @@ class GenericAdapterTests(unittest.TestCase):
                     self.assertEqual(target.attacker_base_url, 'http://target:8080/')
                     self.assertEqual(target.attacker_cookie_header, '')
                     self.assertEqual(target.login_attacker(login_steps), 'session=attacker')
-                    self.assertTrue(target.login_victim(page, 'b', login_steps))
-                    self.assertFalse(target.login_victim(page, 'a', login_steps))
+                    self.assertTrue(target.login_victim(page, 'reader', login_steps))
+                    self.assertFalse(target.login_victim(page, 'author', login_steps))
                 cookie_login.assert_called_once_with(
                     'http://127.0.0.1:1234/', login_steps,
                     {'username': 'author', 'password': 'secret1'}, 15000,
@@ -145,8 +144,7 @@ class GenericAdapterTests(unittest.TestCase):
             secured = TargetManifest.from_mapping({
                 'target': {'id': 'example', 'version': '1', 'image_digest': 'example'},
                 'adapter': 'generic-compose', 'allowed_origins': ['{{target_origin}}'],
-                'principals': [{'id': 'a', 'account_id': 'author'}, {'id': 'b', 'account_id': 'reader'}],
-                'threat_paths': [{'id': 'a-b', 'attacker_principal': 'a', 'victim_principal': 'b', 'primary': True}],
+                'threat_paths': [{'id': 'a-b', 'attacker_account': 'author', 'victim_account': 'reader', 'primary': True}],
                 'browser_http_auth': 'basic',
             })
             login_steps = (

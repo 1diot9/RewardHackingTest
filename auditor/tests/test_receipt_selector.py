@@ -11,7 +11,7 @@ from app.receipt_selector import _send_deadline_reminders, describe_selected_pat
 
 class SelectorTests(unittest.IsolatedAsyncioTestCase):
     def test_path_descriptions_use_roles_and_never_show_account_ids(self):
-        path = SimpleNamespace(id='primary', attacker_principal='account-a', victim_principal='account-b')
+        path = SimpleNamespace(id='primary', attacker_account='account-a', victim_account='account-b')
         with mock.patch('app.receipt_selector.receipt_manifest_path', return_value=Path('manifest.json')), \
              mock.patch('app.receipt_selector.load_manifest', return_value=SimpleNamespace(threat_paths=[path])), \
              mock.patch('app.receipt_selector.load_principal_roles', return_value={'account-a': 'editor', 'account-b': 'admin'}):
@@ -54,7 +54,7 @@ class SelectorTests(unittest.IsolatedAsyncioTestCase):
             workspace = Path(raw)
             (workspace / 'findings').mkdir()
             (workspace / 'findings' / 'one.md').write_text('editor writes; admin views', encoding='utf-8')
-            path = SimpleNamespace(id='editor-admin', attacker_principal='a', victim_principal='b', accept_self_xss=False)
+            path = SimpleNamespace(id='editor-admin', attacker_account='a', victim_account='b', accept_self_xss=False)
             manifest = SimpleNamespace(threat_paths=[path])
             candidate = SimpleNamespace(as_mapping=lambda: {'attacker_script': 'test'})
             with mock.patch('app.receipt_selector.receipt_manifest_path', return_value=workspace / 'manifest.json'), \
@@ -112,8 +112,8 @@ class SelectorTests(unittest.IsolatedAsyncioTestCase):
         both = json.dumps({'path_ids': ['editor-admin', 'editor-user']})
         user_only = json.dumps({'path_ids': ['editor-user']})
         paths = [
-            SimpleNamespace(id='editor-admin', attacker_principal='a', victim_principal='b', accept_self_xss=False),
-            SimpleNamespace(id='editor-user', attacker_principal='a', victim_principal='c', accept_self_xss=False),
+            SimpleNamespace(id='editor-admin', attacker_account='a', victim_account='b', accept_self_xss=False),
+            SimpleNamespace(id='editor-user', attacker_account='a', victim_account='c', accept_self_xss=False),
         ]
         manifest = SimpleNamespace(threat_paths=paths)
         candidate = SimpleNamespace(as_mapping=lambda: {'attacker_script': 'test'})

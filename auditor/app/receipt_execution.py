@@ -383,7 +383,7 @@ def _prepend_step(feedback: dict[str, str], step: str) -> None:
 
 def _outcome_group_key(path: PathResult, roles: Mapping[str, str]) -> tuple[str, str, str, int | None, str]:
     """按可公开的受害者角色、结论和浏览器阻挡方式分组，不包含链路 ID。"""
-    role = roles.get(path.victim_principal, "")
+    role = roles.get(path.victim_account, "")
     browser = path.evidence.get("browser_error")
     detail = browser if isinstance(browser, dict) else {}
     index = detail.get("action_index")

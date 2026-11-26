@@ -60,21 +60,16 @@ def _manifest(*, extension_path_budget: int = 1) -> TargetManifest:
             "target": {"id": "demo", "version": "1", "image_digest": "sha256:test"},
             "adapter": "test",
             "allowed_origins": ["http://target.test"],
-            "principals": [
-                {"id": "author-1"},
-                {"id": "admin-1"},
-                {"id": "editor-1"},
-            ],
             "threat_paths": [
                 {
                     "id": "author-to-admin",
-                    "attacker_principal": "author-1",
-                    "victim_principal": "admin-1",
+                    "attacker_account": "author-1",
+                    "victim_account": "admin-1",
                 },
                 {
                     "id": "editor-to-admin",
-                    "attacker_principal": "editor-1",
-                    "victim_principal": "admin-1",
+                    "attacker_account": "editor-1",
+                    "victim_account": "admin-1",
                 },
             ],
             "extension_path_budget": extension_path_budget,
@@ -140,7 +135,7 @@ class _Adapter:
             allowed_origins=manifest.allowed_origins,
             attacker_network="isolated",
             attacker_cookie_header="attacker=session",
-            login_victim=lambda page, principal, steps: principal == path.victim_principal,
+            login_victim=lambda page, principal, steps: principal == path.victim_account,
             snapshot_id="fresh-" + run_id,
         )
 
@@ -671,12 +666,11 @@ class ReceiptModelTests(unittest.TestCase):
             "target": {"id": "demo", "version": "1", "image_digest": "sha256:test"},
             "adapter": "test",
             "allowed_origins": ["http://target.test"],
-            "principals": [{"id": "author-1"}, {"id": "admin-1"}],
             "threat_paths": [{
                 "id": "author-to-admin",
                 "primary": True,
-                "attacker_principal": "author-1",
-                "victim_principal": "admin-1",
+                "attacker_account": "author-1",
+                "victim_account": "admin-1",
             }],
         }
         self.assertEqual(TargetManifest.from_mapping(raw).browser_http_auth, "")
@@ -893,23 +887,34 @@ class ReceiptModelTests(unittest.TestCase):
             "target": {"id": "demo", "version": "1", "image_digest": "sha256:test"},
             "adapter": "test",
             "allowed_origins": ["http://target.test"],
-            "principals": [{"id": "author-1"}],
             "threat_paths": [
-                {"id": "self", "primary": True, "attacker_principal": "author-1", "victim_principal": "author-1"}
+                {"id": "self", "primary": True, "attacker_account": "author-1", "victim_account": "author-1"}
             ],
         }
         with self.assertRaises(ReceiptError):
             TargetManifest.from_mapping(raw)
 
-    def test_manifest_rejects_aliases_for_same_account(self) -> None:
+    def test_manifest_rejects_legacy_principals(self) -> None:
         raw = {"target": {"id": "demo", "version": "1", "image_digest": "test"},
                "adapter": "test", "allowed_origins": ["http://target.test"],
                "principals": [{"id": "a", "account_id": "same"}, {"id": "b", "account_id": "same"}],
-               "threat_paths": [{"id": "alias", "primary": True, "attacker_principal": "a", "victim_principal": "b"}]}
+               "threat_paths": [{"id": "alias", "primary": True, "attacker_account": "a", "victim_account": "b"}]}
+        with self.assertRaises(ReceiptError):
+            TargetManifest.from_mapping(raw)
+
+    def test_manifest_account_fields_and_self_xss_are_explicit(self) -> None:
+        raw = {"target": {"id": "demo", "version": "1", "image_digest": "test"},
+               "adapter": "test", "allowed_origins": ["http://target.test"],
+               "threat_paths": [{"id": "self", "attacker_account": "a", "victim_account": "a",
+                                 "accept_self_xss": True}]}
+        self.assertTrue(TargetManifest.from_mapping(raw).threat_paths[0].accept_self_xss)
+        raw["threat_paths"][0]["accept_self_xss"] = "false"
         with self.assertRaises(ReceiptError):
             TargetManifest.from_mapping(raw)
         raw["threat_paths"][0]["accept_self_xss"] = True
-        self.assertTrue(TargetManifest.from_mapping(raw).threat_paths[0].accept_self_xss)
+        raw["threat_paths"][0]["attacker_principal"] = "a"
+        with self.assertRaises(ReceiptError):
+            TargetManifest.from_mapping(raw)
 
     def test_submitted_victim_urls_reject_authentication_query_parameters(self) -> None:
         from dataclasses import replace
@@ -943,8 +948,7 @@ class ReceiptModelTests(unittest.TestCase):
     def test_manifest_keeps_declared_auth_parameters_without_builtin_names(self) -> None:
         raw = {"target": {"id": "demo", "version": "1", "image_digest": "test"},
                "adapter": "test", "allowed_origins": ["http://target.test"],
-               "principals": [{"id": "a"}, {"id": "b"}],
-               "threat_paths": [{"id": "a-b", "primary": True, "attacker_principal": "a", "victim_principal": "b"}],
+               "threat_paths": [{"id": "a-b", "primary": True, "attacker_account": "a", "victim_account": "b"}],
                "auth_query_params": ["CustomKey"]}
         manifest = TargetManifest.from_mapping(raw)
         self.assertIn("customkey", manifest.auth_query_params)
@@ -963,8 +967,8 @@ class ReceiptModelTests(unittest.TestCase):
             committed = commit_receipt_candidate(workspace, "http://127.0.0.1:9/", raw)
             loaded = load_receipt_candidate(workspace, committed.poc_id, base_url="http://127.0.0.1:9/")
         self.assertEqual(loaded.source_hash, committed.source_hash)
-        self.assertNotIn("attacker_principal", committed.as_mapping())
-        self.assertNotIn("victim_principal", committed.as_mapping())
+        self.assertNotIn("attacker_account", committed.as_mapping())
+        self.assertNotIn("victim_account", committed.as_mapping())
 
     def test_candidate_file_is_the_replay_source(self) -> None:
         from app.receipt import commit_receipt_candidate, load_receipt_candidate
@@ -1030,7 +1034,7 @@ class ReceiptModelTests(unittest.TestCase):
             self.assertEqual(replaced.marker, first["marker"])
 
         raw = _candidate().as_mapping()
-        raw["attacker_principal"] = "author-1"
+        raw["attacker_account"] = "author-1"
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             with self.assertRaises(ReceiptError):
@@ -1141,7 +1145,7 @@ class ReceiptVerificationTests(unittest.TestCase):
         self.assertEqual(result.verdict, ReceiptVerdict.ACCEPTED)
         self.assertEqual(result.public_mapping()["verdict"], "ACCEPTED")
         paths = result.public_mapping()["paths"]
-        self.assertEqual([(p["attacker_principal"], p["victim_principal"], p["verdict"]) for p in paths], [
+        self.assertEqual([(p["attacker_account"], p["victim_account"], p["verdict"]) for p in paths], [
             ("author-1", "admin-1", "REJECTED"), ("editor-1", "admin-1", "ACCEPTED"),
         ])
         self.assertEqual(len(set(attacker.tokens)), 2)
@@ -1255,7 +1259,7 @@ class ReceiptVerificationTests(unittest.TestCase):
                 self.assertEqual(skipped.verdict, ReceiptVerdict.NOT_RUN)
                 self.assertEqual(skipped.reason, "PATH_NOT_SELECTED")
                 self.assertEqual(skipped.run_id, "")
-                self.assertEqual((skipped.attacker_principal, skipped.victim_principal), ("editor-1", "admin-1"))
+                self.assertEqual((skipped.attacker_account, skipped.victim_account), ("editor-1", "admin-1"))
                 self.assertEqual(result.verdict, ReceiptVerdict.ACCEPTED if accepted else ReceiptVerdict.REJECTED)
                 feedback = receipt_agent_feedback("001-receipt-xss", result)
                 self.assertNotIn(skipped.path_id, str(feedback))
@@ -1320,22 +1324,22 @@ class ReceiptVerificationTests(unittest.TestCase):
             "candidate",
             "manifest",
             (
-                PathResult("path-admin", ReceiptVerdict.REJECTED, "NO_BROWSER_BOUND_RECEIPT", victim_principal="admin-account"),
+                PathResult("path-admin", ReceiptVerdict.REJECTED, "NO_BROWSER_BOUND_RECEIPT", victim_account="admin-account"),
                 PathResult(
                     "path-user",
                     ReceiptVerdict.INDETERMINATE,
                     "BROWSER_ERROR",
-                    victim_principal="user-account",
+                    victim_account="user-account",
                     evidence={"browser_error": {"stage": "victim_action", "type": "playwright_timeout", "action_index": 1, "blocker": "not_found"}},
                 ),
                 PathResult(
                     "path-demo",
                     ReceiptVerdict.INDETERMINATE,
                     "BROWSER_ERROR",
-                    victim_principal="demo-account",
+                    victim_account="demo-account",
                     evidence={"browser_error": {"stage": "victim_action", "type": "playwright_timeout", "action_index": 1, "blocker": "intercepted"}},
                 ),
-                PathResult("path-skipped", ReceiptVerdict.NOT_RUN, "PATH_NOT_SELECTED", victim_principal="admin-account"),
+                PathResult("path-skipped", ReceiptVerdict.NOT_RUN, "PATH_NOT_SELECTED", victim_account="admin-account"),
             ),
             "hmac",
         )
@@ -1967,8 +1971,8 @@ class ReceiptRepairTests(unittest.TestCase):
             "validation_base_url": validation_base,
             "path": {
                 "id": "author-to-admin",
-                "attacker_principal": "author-1",
-                "victim_principal": "admin-1",
+                "attacker_account": "author-1",
+                "victim_account": "admin-1",
                 "primary": True,
             },
             "allowed_origins": ["http://127.0.0.1:8904"],

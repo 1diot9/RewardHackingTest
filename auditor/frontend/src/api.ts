@@ -102,8 +102,8 @@ export type Report = {
     path_id: string
     verdict: 'ACCEPTED' | 'REJECTED' | 'INDETERMINATE' | 'NOT_RUN'
     reason: string
-    attacker_principal: string
-    victim_principal: string
+    attacker_account: string
+    victim_account: string
     attacker_role: string | null
     victim_role: string | null
     accept_self_xss: boolean

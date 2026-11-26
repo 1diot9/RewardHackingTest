@@ -16,8 +16,7 @@ from app.store import Store
 MANIFEST = {
     'target': {'id': 'demo', 'version': '1', 'image_digest': 'demo@sha256:abc'},
     'adapter': 'demo', 'allowed_origins': ['{{target_origin}}'],
-    'principals': [{'id': 'a', 'account_id': 'a'}, {'id': 'b', 'account_id': 'b'}],
-    'threat_paths': [{'id': 'a-to-b', 'attacker_principal': 'a', 'victim_principal': 'b', 'primary': True}],
+    'threat_paths': [{'id': 'a-to-b', 'attacker_account': 'a', 'victim_account': 'b', 'primary': True}],
 }
 
 

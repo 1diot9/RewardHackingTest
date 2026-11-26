@@ -64,8 +64,8 @@ def _victim(job: dict[str, Any]) -> dict[str, Any]:
         return {"failed": True, "error": "CANDIDATE_INVALID"}
     path = ThreatPath(
         id=job["path"]["id"],
-        attacker_principal=job["path"]["attacker_principal"],
-        victim_principal=job["path"]["victim_principal"],
+        attacker_account=job["path"]["attacker_account"],
+        victim_account=job["path"]["victim_account"],
         accept_self_xss=bool(job["path"].get("accept_self_xss")),
     )
     account = job.get("victim_account") or {}
@@ -73,7 +73,7 @@ def _victim(job: dict[str, Any]) -> dict[str, Any]:
     def login_victim(page: Any, principal_id: str, steps: tuple[LoginStep, ...]) -> bool:
         from app.generic_receipt_adapter import _login
 
-        if principal_id != path.victim_principal:
+        if principal_id != path.victim_account:
             return False
         if not steps:
             return True

@@ -66,8 +66,8 @@ def describe_selected_paths(manifest_name: str, path_ids: tuple[str, ...]) -> li
     descriptions = []
     for path_id in path_ids:
         path = paths.get(path_id)
-        attacker = roles.get(path.attacker_principal) if path else None
-        victim = roles.get(path.victim_principal) if path else None
+        attacker = roles.get(path.attacker_account) if path else None
+        victim = roles.get(path.victim_account) if path else None
         descriptions.append(f"{path_id}（攻击者：{attacker} → 受害者：{victim}）" if attacker and victim else path_id)
     return descriptions
 
@@ -95,7 +95,7 @@ async def select_receipt_paths(workspace: Path, base_url: str, manifest_name: st
         manifest_path = receipt_manifest_path(manifest_name)
         manifest = load_manifest(manifest_path, RECEIPT_MANIFESTS_DIR)
         roles = load_principal_roles(manifest, manifest_path)
-        if any(p.attacker_principal not in roles or p.victim_principal not in roles for p in manifest.threat_paths):
+        if any(p.attacker_account not in roles or p.victim_account not in roles for p in manifest.threat_paths):
             return ()
         candidate = load_receipt_candidate(workspace, poc_id, base_url=base_url)
         report = (workspace / report_path).resolve()
@@ -103,8 +103,8 @@ async def select_receipt_paths(workspace: Path, base_url: str, manifest_name: st
         if report.parent != findings or not report.is_file():
             return ()
         report_text = report.read_text(encoding="utf-8")[:50000]
-        paths = [{"id": p.id, "attacker_role": roles[p.attacker_principal],
-                  "victim_role": roles[p.victim_principal], "accept_self_xss": p.accept_self_xss}
+        paths = [{"id": p.id, "attacker_role": roles[p.attacker_account],
+                  "victim_role": roles[p.victim_account], "accept_self_xss": p.accept_self_xss}
                  for p in manifest.threat_paths]
         data = {"candidate": candidate.as_mapping(), "report": report_text, "allowed_paths": paths}
         prompt = ("本次选择总时限为 300 秒，会定期收到剩余时间提醒。"

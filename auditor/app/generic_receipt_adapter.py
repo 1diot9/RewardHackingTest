@@ -128,8 +128,8 @@ def load_run_info(run_dir: Path, manifest: TargetManifest) -> dict[str, Any]:
         if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port or url.path not in {"", "/"} or url.query or url.fragment or url.username or url.password:
             raise ValueError("base_url 必须是带端口的 127.0.0.1 HTTP 地址")
         accounts = raw["accounts"]
-        for principal in manifest.principals.values():
-            account = accounts[principal.account_id]
+        for account_id in {account for path in manifest.threat_paths for account in (path.attacker_account, path.victim_account)}:
+            account = accounts[account_id]
             if any(not isinstance(account.get(key), str) or not account[key] for key in ("username", "password")):
                 raise ValueError("账号缺少凭据")
         return raw
@@ -388,14 +388,13 @@ class GenericComposeAdapter:
                 _run(["docker", "network", "connect", "--alias", "target", network, container], environment, env, 60)
                 network_connected = True
 
-                def account_for(principal_id: str) -> dict[str, str]:
-                    principal = manifest.principals[principal_id]
-                    return info["accounts"][principal.account_id]
+                def account_for(account_id: str) -> dict[str, str]:
+                    return info["accounts"][account_id]
 
                 def login_attacker(steps: tuple[LoginStep, ...], auth_headers: tuple[AuthHeader, ...] = ()) -> str | AttackerSession:
                     if not steps:
                         return ""
-                    attacker = account_for(path.attacker_principal)
+                    attacker = account_for(path.attacker_account)
                     args = (
                         base_url,
                         steps,
@@ -412,7 +411,7 @@ class GenericComposeAdapter:
                     return _login_cookie_header(*args)
 
                 def login_victim(page: Any, principal_id: str, steps: tuple[LoginStep, ...]) -> bool:
-                    if principal_id != path.victim_principal:
+                    if principal_id != path.victim_account:
                         return False
                     if not steps:
                         return True
@@ -429,9 +428,9 @@ class GenericComposeAdapter:
                     snapshot_id=project,
                     login_attacker=login_attacker,
                     victim_http_credentials=page_http_credentials(
-                        manifest.browser_http_auth, account_for(path.victim_principal)
+                        manifest.browser_http_auth, account_for(path.victim_account)
                     ),
-                    victim_account=account_for(path.victim_principal),
+                    victim_account=account_for(path.victim_account),
                 )
             finally:
                 # 清理异常若继续抛出，会盖住 with 块里已经返回的路径结论，

@@ -59,11 +59,7 @@ def load_principal_roles(manifest: TargetManifest, manifest_path: Path) -> dict[
         and isinstance(account.get("role_id"), str)
         and account["role_id"].strip()
     }
-    return {
-        principal_id: roles_by_account[principal.account_id]
-        for principal_id, principal in manifest.principals.items()
-        if principal.account_id in roles_by_account
-    }
+    return roles_by_account
 
 
 def list_reports(
@@ -167,11 +163,14 @@ def _verification_paths(
     for path in paths:
         if not isinstance(path, dict) or path.get("verdict") not in {"ACCEPTED", "REJECTED", "INDETERMINATE", "NOT_RUN"}:
             continue
-        if not all(isinstance(path.get(key), str) and path[key] for key in ("path_id", "attacker_principal", "victim_principal")):
+        path = dict(path)
+        path.setdefault("attacker_account", path.get("attacker_principal"))
+        path.setdefault("victim_account", path.get("victim_principal"))
+        if not all(isinstance(path.get(key), str) and path[key] for key in ("path_id", "attacker_account", "victim_account")):
             continue
-        item = {key: path.get(key) for key in ("path_id", "verdict", "reason", "attacker_principal", "victim_principal", "accept_self_xss")}
-        item["attacker_role"] = roles.get(path["attacker_principal"])
-        item["victim_role"] = roles.get(path["victim_principal"])
+        item = {key: path.get(key) for key in ("path_id", "verdict", "reason", "attacker_account", "victim_account", "accept_self_xss")}
+        item["attacker_role"] = roles.get(path["attacker_account"])
+        item["victim_role"] = roles.get(path["victim_account"])
         result.append(item)
     return result
 

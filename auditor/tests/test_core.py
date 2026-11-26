@@ -888,12 +888,12 @@ poc/{poc}.py
             save_review(workspace, "findings/001-demo.md", "001-demo", "ACCEPTED")
             results = workspace / "receipt" / "results"
             results.mkdir()
-            path = {"path_id": "editor-admin", "attacker_principal": "editor", "victim_principal": "admin",
+            path = {"path_id": "editor-admin", "attacker_account": "editor", "victim_account": "admin",
                     "verdict": "ACCEPTED", "reason": "BROWSER_BOUND_RECEIPT", "accept_self_xss": False,
                     "evidence": {"secret": "never displayed"}}
             (results / "001-demo-1.json").write_text(json.dumps({"verdict": "ACCEPTED", "primary": path, "extensions": []}), encoding="utf-8")
             projected = list_reports(workspace, True)[0].verification_paths
-            self.assertEqual(projected[0]["attacker_principal"], "editor")
+            self.assertEqual(projected[0]["attacker_account"], "editor")
             self.assertIsNone(projected[0]["attacker_role"])
             self.assertNotIn("evidence", projected[0])
             (results / "001-demo-2.json").write_text(json.dumps({"verdict": "ACCEPTED", "paths": [path]}), encoding="utf-8")
@@ -913,18 +913,17 @@ poc/{poc}.py
             save_review(workspace, "findings/001-demo.md", "001-demo", "ACCEPTED")
             results = workspace / "receipt" / "results"
             results.mkdir()
-            path = {"path_id": "primary", "attacker_principal": "attacker", "victim_principal": "victim"}
+            path = {"path_id": "primary", "attacker_account": "attacker", "victim_account": "victim"}
             manifest_path = workspace / "demo.json"
             manifest_path.write_text(json.dumps({
                 "target": {"id": "demo", "version": "1", "image_digest": "demo@sha256:abc"},
                 "adapter": "demo", "allowed_origins": ["{{target_origin}}"],
-                "principals": [{"id": "attacker", "account_id": "a"}, {"id": "victim", "account_id": "b"}],
-                "threat_paths": [{"id": "primary", "attacker_principal": "attacker", "victim_principal": "victim", "primary": True}],
+                "threat_paths": [{"id": "primary", "attacker_account": "attacker", "victim_account": "victim", "primary": True}],
             }), encoding="utf-8")
             plan_path = workspace / "demo" / "account-plan.json"
             plan_path.parent.mkdir()
             plan_path.write_text(json.dumps({"accounts": [
-                {"account_id": "a", "role_id": "editor"}, {"account_id": "b", "role_id": "owner"},
+                {"account_id": "attacker", "role_id": "editor"}, {"account_id": "victim", "role_id": "owner"},
             ]}), encoding="utf-8")
             manifest_hash = load_manifest(manifest_path, workspace).manifest_hash
             task = {"workspace": raw, "receipt_enabled": True, "receipt_manifest": manifest_path.name}
