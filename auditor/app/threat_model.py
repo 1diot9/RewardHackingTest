@@ -217,7 +217,6 @@ def _paths(
         victim = _ident(item.get("victim_role"), "路径受害者", blocking)
         attacker_account = _ident(item.get("attacker_account"), "路径攻击者账号", blocking)
         victim_account = _ident(item.get("victim_account"), "路径受害者账号", blocking)
-        primary = item.get("primary")
         self_xss = item.get("accept_self_xss")
         if not path_id or not attacker or not victim or not attacker_account or not victim_account:
             continue
@@ -225,8 +224,8 @@ def _paths(
             blocking.append(f"路径 id 重复：{path_id}")
             continue
         seen.add(path_id)
-        if not isinstance(primary, bool) or not isinstance(self_xss, bool):
-            blocking.append(f"路径 {path_id} 的 primary 和 accept_self_xss 必须是布尔值")
+        if not isinstance(self_xss, bool):
+            blocking.append(f"路径 {path_id} 的 accept_self_xss 必须是布尔值")
             continue
         if attacker not in roles or victim not in roles:
             blocking.append(f"路径 {path_id} 引用了未知角色")
@@ -247,7 +246,6 @@ def _paths(
             "victim_role": victim,
             "attacker_account": attacker_account,
             "victim_account": victim_account,
-            "primary": primary,
             "accept_self_xss": self_xss,
         })
     included = {role_id for role_id, item in dispositions.items() if item["disposition"] == "include"}
@@ -255,8 +253,6 @@ def _paths(
     missing = sorted(included - used)
     if missing:
         blocking.append("已纳入的攻击者没有路径：" + "、".join(missing))
-    if paths and sum(path["primary"] for path in paths) != 1:
-        blocking.append("威胁决策必须且只能有一条 primary 路径")
     if dispositions and not paths and not included:
         blocking.append("威胁决策没有任何攻击路径")
     return paths
@@ -401,7 +397,6 @@ def _projection(paths: list[dict[str, Any]], plan: dict[str, dict[str, Any]]) ->
             "id": path["id"],
             "attacker_principal": path["attacker_account"],
             "victim_principal": path["victim_account"],
-            "primary": path["primary"],
             "accept_self_xss": path["accept_self_xss"],
         }
         for path in sorted(paths, key=lambda item: item["id"])
@@ -436,7 +431,6 @@ def _manifest_matches(raw: dict[str, Any] | None, projection: dict[str, Any], bl
             "id": item.get("id"),
             "attacker_principal": item.get("attacker_principal"),
             "victim_principal": item.get("victim_principal"),
-            "primary": bool(item.get("primary", False)),
             "accept_self_xss": bool(item.get("accept_self_xss", False)),
         })
     if sorted(paths, key=lambda item: str(item["id"])) != projection["threat_paths"]:

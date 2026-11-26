@@ -61,7 +61,6 @@ class ThreatPath:
     id: str
     attacker_principal: str
     victim_principal: str
-    primary: bool = False
     accept_self_xss: bool = False
 
 
@@ -80,13 +79,6 @@ class TargetManifest:
     manifest_hash: str = ""
     auth_query_params: tuple[str, ...] = ()
     browser_http_auth: str = ""
-
-    @property
-    def primary_path(self) -> ThreatPath:
-        primary = [path for path in self.threat_paths if path.primary]
-        if len(primary) != 1:
-            raise ReceiptError("Manifest 必须且只能包含一条 primary threat_path")
-        return primary[0]
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "TargetManifest":
@@ -132,15 +124,11 @@ class TargetManifest:
                     id=path_id,
                     attacker_principal=attacker,
                     victim_principal=victim,
-                    primary=bool(path.get("primary", False)),
                     accept_self_xss=bool(path.get("accept_self_xss", False)),
                 )
             )
         if not paths:
             raise ReceiptError("threat_paths 不能为空")
-        if sum(path.primary for path in paths) != 1:
-            raise ReceiptError("Manifest 必须且只能包含一条 primary threat_path")
-
         timeout = _positive_int(raw.get("browser_timeout_ms", 15_000), "browser_timeout_ms")
         http_auth = raw.get("browser_http_auth", "")
         if not isinstance(http_auth, str) or http_auth not in {"", "basic"}:
@@ -959,7 +947,6 @@ def _victim_browser_bounded(
                 "id": path.id,
                 "attacker_principal": path.attacker_principal,
                 "victim_principal": path.victim_principal,
-                "primary": path.primary,
                 "accept_self_xss": path.accept_self_xss,
             },
             "allowed_origins": list(target.allowed_origins),
@@ -1230,14 +1217,13 @@ class PathResult:
 class ReceiptResult:
     candidate_hash: str
     manifest_hash: str
-    primary: PathResult
-    extensions: tuple[PathResult, ...]
+    paths: tuple[PathResult, ...]
     receipt_hmac: str
 
     @property
     def decisive_path(self) -> PathResult:
         """选择决定汇总结论的路径，优先保留成功和未完成验证的证据。"""
-        all_paths = (self.primary, *self.extensions)
+        all_paths = self.paths
         paths = tuple(path for path in all_paths if path.reason != "PATH_NOT_SELECTED") or all_paths
         for verdict in (ReceiptVerdict.ACCEPTED, ReceiptVerdict.INDETERMINATE, ReceiptVerdict.NOT_RUN):
             for path in paths:
@@ -1255,8 +1241,7 @@ class ReceiptResult:
             "candidate_hash": self.candidate_hash,
             "manifest_hash": self.manifest_hash,
             "verdict": self.verdict.value,
-            "primary": _path_result_mapping(self.primary),
-            "extensions": [_path_result_mapping(item) for item in self.extensions],
+            "paths": [_path_result_mapping(item) for item in self.paths],
             "receipt_hmac": self.receipt_hmac,
         }
 
@@ -1303,24 +1288,19 @@ class ReceiptVerifier:
             results[path_id] = (PathResult(path_id, ReceiptVerdict.REJECTED, "VICTIM_URL_AUTH_PARAMETER")
                                 if invalid_auth_url else self._verify_path(candidate, manifest, path, attempt))
             report_progress()
-        primary = results[manifest.primary_path.id]
-        extensions = [results[path.id] for path in manifest.threat_paths if not path.primary]
-
         def bind_path(result: PathResult) -> PathResult:
             path = paths_by_id[result.path_id]
             return replace(result, attacker_principal=path.attacker_principal,
                            victim_principal=path.victim_principal, accept_self_xss=path.accept_self_xss)
 
-        primary = bind_path(primary)
-        extensions = [bind_path(result) for result in extensions]
+        ordered = [bind_path(results[path.id]) for path in manifest.threat_paths]
         payload = {
             "candidate_hash": candidate.source_hash,
             "manifest_hash": manifest.manifest_hash,
-            "primary": _path_result_mapping(primary),
-            "extensions": [_path_result_mapping(item) for item in extensions],
+            "paths": [_path_result_mapping(item) for item in ordered],
         }
         signature = hmac.new(self.receipt_key, json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(), hashlib.sha256).hexdigest()
-        return ReceiptResult(candidate.source_hash, manifest.manifest_hash, primary, tuple(extensions), signature)
+        return ReceiptResult(candidate.source_hash, manifest.manifest_hash, tuple(ordered), signature)
 
     def _verify_path(self, candidate: ReceiptCandidate, manifest: TargetManifest, path: ThreatPath, attempt: int) -> PathResult:
         run_id = secrets.token_hex(16)

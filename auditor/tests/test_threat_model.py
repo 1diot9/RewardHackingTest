@@ -31,7 +31,6 @@ def write_closed_model(
             "victim_role": victim,
             "attacker_account": attacker,
             "victim_account": victim,
-            "primary": True,
             "accept_self_xss": False,
         }],
         "boundaries": [],
@@ -53,7 +52,6 @@ def write_closed_model(
             "id": path_id,
             "attacker_principal": attacker,
             "victim_principal": victim,
-            "primary": True,
             "accept_self_xss": False,
         }],
         "extension_path_budget": 0,
@@ -113,6 +111,22 @@ class ThreatModelTests(unittest.TestCase):
             self.assertEqual(report.review_items, [])
             self.assertTrue(report.digest)
             self.assertFalse((environment / "role-inventory.json").exists())
+
+    def test_legacy_primary_flags_do_not_change_model(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            environment = root / "environment"
+            manifest = write_closed_model(environment, root / "source")
+            _write(environment / "receipt-manifest.json", manifest)
+            current = evaluate_threat_model(environment, root / "source")
+            decisions = json.loads((environment / "threat-decisions.json").read_text(encoding="utf-8"))
+            decisions["paths"][0]["primary"] = False
+            manifest["threat_paths"][0]["primary"] = True
+            _write(environment / "threat-decisions.json", decisions)
+            _write(environment / "receipt-manifest.json", manifest)
+            legacy = evaluate_threat_model(environment, root / "source")
+            self.assertTrue(legacy.ok, legacy.messages)
+            self.assertEqual(current.digest, legacy.digest)
 
     def test_legacy_scopes_cannot_hide_uncovered_roles(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -186,7 +200,6 @@ class ThreatModelTests(unittest.TestCase):
                 "victim_role": "b",
                 "attacker_account": "c",
                 "victim_account": "b",
-                "primary": False,
                 "accept_self_xss": False,
             })
             decisions["boundaries"] = []

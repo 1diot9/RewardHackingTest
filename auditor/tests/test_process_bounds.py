@@ -69,10 +69,9 @@ class ProcessBoundTests(unittest.TestCase):
     def test_feedback_includes_login_and_browser_steps(self) -> None:
         attacker = ReceiptResult(
             "c", "m",
-            PathResult("path", ReceiptVerdict.REJECTED, "ATTACKER_LOGIN_FAILED", evidence={
+            (PathResult("path", ReceiptVerdict.REJECTED, "ATTACKER_LOGIN_FAILED", evidence={
                 "attacker_error": {"stage": "attacker_login", "step": "attacker_login.click", "index": 2, "timeout_seconds": 60},
-            }),
-            (), "sig",
+            }),), "sig",
         )
         attacker_feedback = receipt_agent_feedback("poc", attacker)
         self.assertIn("Step: attacker_login.click.", attacker_feedback["reason_description"])
@@ -81,10 +80,9 @@ class ProcessBoundTests(unittest.TestCase):
 
         browser = ReceiptResult(
             "c", "m",
-            PathResult("path", ReceiptVerdict.INDETERMINATE, "BROWSER_ERROR", evidence={
+            (PathResult("path", ReceiptVerdict.INDETERMINATE, "BROWSER_ERROR", evidence={
                 "browser_error": {"stage": "victim_login", "type": "playwright_timeout", "step": "victim_login.click", "step_index": 2},
-            }),
-            (), "sig",
+            }),), "sig",
         )
         browser_feedback = receipt_agent_feedback("poc", browser)
         self.assertIn("Step: victim_login.click.", browser_feedback["reason_description"])

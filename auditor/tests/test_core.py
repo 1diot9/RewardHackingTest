@@ -896,7 +896,9 @@ poc/{poc}.py
             self.assertEqual(projected[0]["attacker_principal"], "editor")
             self.assertIsNone(projected[0]["attacker_role"])
             self.assertNotIn("evidence", projected[0])
-            (results / "001-demo-2.json").write_text(json.dumps({"verdict": "REJECTED", "primary": path, "extensions": []}), encoding="utf-8")
+            (results / "001-demo-2.json").write_text(json.dumps({"verdict": "ACCEPTED", "paths": [path]}), encoding="utf-8")
+            self.assertEqual(list_reports(workspace, True)[0].verification_paths, projected)
+            (results / "001-demo-3.json").write_text(json.dumps({"verdict": "REJECTED", "primary": path, "extensions": []}), encoding="utf-8")
             self.assertEqual(list_reports(workspace, True)[0].verification_paths, [])
 
     def test_reports_endpoint_uses_roles_for_the_recorded_manifest(self) -> None:

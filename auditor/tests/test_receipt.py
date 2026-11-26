@@ -31,9 +31,7 @@ class ReceiptVerifier(BaseReceiptVerifier):
 
     def verify(self, candidate, manifest, **kwargs):
         if "preferred_path_ids" not in kwargs:
-            kwargs["preferred_path_ids"] = (manifest.primary_path.id,) + tuple(
-                path.id for path in manifest.threat_paths if not path.primary
-            )
+            kwargs["preferred_path_ids"] = tuple(path.id for path in manifest.threat_paths)
         return super().verify(candidate, manifest, **kwargs)
 
 
@@ -70,7 +68,6 @@ def _manifest(*, extension_path_budget: int = 1) -> TargetManifest:
             "threat_paths": [
                 {
                     "id": "author-to-admin",
-                    "primary": True,
                     "attacker_principal": "author-1",
                     "victim_principal": "admin-1",
                 },
@@ -227,10 +224,10 @@ class PlaywrightDiagnosticsTests(unittest.TestCase):
                 package.sync_api = api
                 candidate = replace(_candidate(), victim_login=(object(),))
                 manifest = _manifest(extension_path_budget=0)
-                with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+                with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
                     target = replace(target, login_victim=lambda *args: (fail_at("victim_login") or True))
                     with patch.dict(sys.modules, {"playwright": package, "playwright.sync_api": api}):
-                        evidence = PlaywrightVictimDriver().run(candidate, target, manifest.primary_path, secret, 1000)
+                        evidence = PlaywrightVictimDriver().run(candidate, target, manifest.threat_paths[0], secret, 1000)
                 self.assertEqual(evidence.reason, "BROWSER_ERROR")
                 self.assertEqual(evidence.error_stage, failure_stage)
                 self.assertEqual(evidence.error_type, "playwright_timeout")
@@ -312,9 +309,9 @@ class PlaywrightDiagnosticsTests(unittest.TestCase):
         package = types.ModuleType("playwright")
         package.sync_api = api
         manifest = _manifest(extension_path_budget=0)
-        with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+        with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
             with patch.dict(sys.modules, {"playwright": package, "playwright.sync_api": api}):
-                evidence = PlaywrightVictimDriver().run(_candidate(), target, manifest.primary_path, secret, 1000)
+                evidence = PlaywrightVictimDriver().run(_candidate(), target, manifest.threat_paths[0], secret, 1000)
         self.assertTrue(evidence.accepted)
         self.assertEqual(evidence.reason, "BROWSER_BOUND_RECEIPT")
 
@@ -388,11 +385,11 @@ class PlaywrightDiagnosticsTests(unittest.TestCase):
         def login_victim(*args):
             raise StepTimeout("victim_login.assert_visible", 1, 4)
 
-        with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+        with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
             target = replace(target, login_victim=login_victim)
             with patch.dict(sys.modules, {"playwright": package, "playwright.sync_api": api}):
                 evidence = PlaywrightVictimDriver().run(
-                    candidate, target, manifest.primary_path, "token", 1000, settle=settle,
+                    candidate, target, manifest.threat_paths[0], "token", 1000, settle=settle,
                 )
         self.assertEqual(order, ["settle", "stop"])
         self.assertEqual(evidence.reason, "BROWSER_ERROR")
@@ -413,7 +410,7 @@ class PlaywrightDiagnosticsTests(unittest.TestCase):
             _candidate(), _manifest(extension_path_budget=0)
         )
         self.assertEqual(result.verdict, ReceiptVerdict.INDETERMINATE)
-        self.assertEqual(result.public_mapping()["primary"]["evidence"]["browser_error"],
+        self.assertEqual(result.public_mapping()["paths"][0]["evidence"]["browser_error"],
                          {"stage": "victim_action", "type": "playwright_timeout", "action_index": 0})
         feedback = receipt_agent_feedback("001-receipt-xss", result)
         self.assertNotIn("browser_error", feedback)
@@ -442,7 +439,7 @@ class PlaywrightDiagnosticsTests(unittest.TestCase):
                     adapter=_Adapter(), attacker=_Attacker(), browser=FailedBrowser(), receipt_key=b"k" * 32,
                 ).verify(_candidate(), _manifest(extension_path_budget=0))
                 self.assertEqual(result.verdict, ReceiptVerdict.REJECTED)
-                self.assertEqual(result.primary.reason, "BROWSER_ERROR")
+                self.assertEqual(result.paths[0].reason, "BROWSER_ERROR")
                 feedback = receipt_agent_feedback("001-receipt-xss", result)
                 self.assertEqual(feedback["verdict"], "REJECTED")
                 self.assertEqual(feedback["reason"], "BROWSER_ERROR")
@@ -506,7 +503,7 @@ class AttackerDiagnosticsTests(unittest.TestCase):
             poclib_file = Path(directory) / "poclib.py"
             poclib_file.write_text("pass", encoding="utf-8")
             manifest = _manifest(extension_path_budget=0)
-            with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
                 executor = DockerAttackerExecutor(image="test-image", poclib_file=poclib_file)
                 completed = Mock(returncode=1, stderr="执行失败: secret-token\nRECEIPT_POC_FAILURE:ValueError\n")
                 with patch("app.receipt.is_pinned_attacker_image", return_value=True), patch("app.receipt.subprocess.run", return_value=completed):
@@ -531,7 +528,7 @@ class AttackerDiagnosticsTests(unittest.TestCase):
             poclib_file = Path(directory) / "poclib.py"
             poclib_file.write_text("pass", encoding="utf-8")
             manifest = _manifest(extension_path_budget=0)
-            with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
                 executor = DockerAttackerExecutor(image="test-image", poclib_file=poclib_file)
                 missing = Mock(returncode=1, stderr="没有观察到证据\nRECEIPT_POC_FAILURE:EvidenceMissing\nsecret-password\n")
                 syntax = Mock(returncode=1, stderr="SyntaxError: invalid syntax\n")
@@ -561,7 +558,7 @@ class AttackerDiagnosticsTests(unittest.TestCase):
                 captured["kwargs"] = kwargs
                 return Mock(returncode=1, stderr="RECEIPT_POC_FAILURE:EvidenceMissing\n")
 
-            with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
                 executor = DockerAttackerExecutor(image="test-image", poclib_file=poclib_file)
                 with patch("app.receipt.is_pinned_attacker_image", return_value=True), patch("app.receipt.subprocess.run", side_effect=fake_run):
                     ok, reason = executor.run(_candidate(), target, "challenge", 1)
@@ -584,7 +581,7 @@ class AttackerDiagnosticsTests(unittest.TestCase):
             poclib_file = Path(directory) / "poclib.py"
             poclib_file.write_text("pass", encoding="utf-8")
             manifest = _manifest(extension_path_budget=0)
-            with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
                 executor = DockerAttackerExecutor(image="test-image", poclib_file=poclib_file)
                 completed = Mock(returncode=returncode, stderr=stderr)
                 with patch("app.receipt.is_pinned_attacker_image", return_value=True), patch("app.receipt.subprocess.run", return_value=completed):
@@ -627,7 +624,7 @@ class AttackerDiagnosticsTests(unittest.TestCase):
                     poclib_file = Path(directory) / "poclib.py"
                     poclib_file.write_text("pass", encoding="utf-8")
                     manifest = _manifest(extension_path_budget=0)
-                    with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+                    with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
                         target = replace(target, login_attacker=lambda steps, error=exc: (_ for _ in ()).throw(error))
                         executor = DockerAttackerExecutor(image="test-image", poclib_file=poclib_file)
                         with patch("app.receipt.is_pinned_attacker_image", return_value=True):
@@ -764,12 +761,12 @@ class ReceiptModelTests(unittest.TestCase):
         package.sync_api = api
         manifest = _manifest(extension_path_budget=0)
         credentials = {"username": "reader", "password": "secret2"}
-        with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+        with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
             with patch.dict(sys.modules, {"playwright": package, "playwright.sync_api": api}):
-                PlaywrightVictimDriver().run(_candidate(), target, manifest.primary_path, "receipt-token", 1000)
+                PlaywrightVictimDriver().run(_candidate(), target, manifest.threat_paths[0], "receipt-token", 1000)
                 self.assertEqual(seen["kwargs"], {})
                 evidence = PlaywrightVictimDriver().run(
-                    _candidate(), replace(target, victim_http_credentials=credentials), manifest.primary_path, "receipt-token", 1000,
+                    _candidate(), replace(target, victim_http_credentials=credentials), manifest.threat_paths[0], "receipt-token", 1000,
                 )
         self.assertEqual(seen["kwargs"], {"http_credentials": credentials})
         self.assertTrue(evidence.accepted)
@@ -863,10 +860,10 @@ class ReceiptModelTests(unittest.TestCase):
             package.sync_api = api
             manifest = _manifest(extension_path_budget=0)
             candidate = replace(_candidate(), victim_login=(LoginStep("goto", path="/login"),))
-            with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
                 target = replace(target, login_victim=lambda *args: True)
                 with patch.dict(sys.modules, {"playwright": package, "playwright.sync_api": api}):
-                    return PlaywrightVictimDriver().run(candidate, target, manifest.primary_path, secret, 1000)
+                    return PlaywrightVictimDriver().run(candidate, target, manifest.threat_paths[0], secret, 1000)
 
         session = {"name": "PHPSESSID", "value": "victim", "domain": "target.test", "path": "/"}
         csrf = {"name": "csrf", "value": "a", "domain": "target.test", "path": "/"}
@@ -912,7 +909,7 @@ class ReceiptModelTests(unittest.TestCase):
         with self.assertRaises(ReceiptError):
             TargetManifest.from_mapping(raw)
         raw["threat_paths"][0]["accept_self_xss"] = True
-        self.assertTrue(TargetManifest.from_mapping(raw).primary_path.accept_self_xss)
+        self.assertTrue(TargetManifest.from_mapping(raw).threat_paths[0].accept_self_xss)
 
     def test_submitted_victim_urls_reject_authentication_query_parameters(self) -> None:
         from dataclasses import replace
@@ -923,11 +920,11 @@ class ReceiptModelTests(unittest.TestCase):
         for url in ("/view?SESSION_ID=abc", "/view?%6dy_auth=abc", "/view?my_auth="):
             with self.subTest(url=url):
                 result = verifier.verify(replace(_candidate(), victim_url=url), manifest)
-                self.assertEqual(result.primary.reason, "VICTIM_URL_AUTH_PARAMETER")
+                self.assertEqual(result.paths[0].reason, "VICTIM_URL_AUTH_PARAMETER")
                 self.assertEqual(receipt_agent_feedback("001-receipt-xss", result)["reason"], "VICTIM_URL_AUTH_PARAMETER")
         from app.receipt import LoginStep
         candidate = replace(_candidate(), victim_login=(LoginStep("goto", path="/login?my_auth=x"),))
-        self.assertEqual(verifier.verify(candidate, manifest).primary.reason, "VICTIM_URL_AUTH_PARAMETER")
+        self.assertEqual(verifier.verify(candidate, manifest).paths[0].reason, "VICTIM_URL_AUTH_PARAMETER")
         self.assertEqual(verifier.verify(replace(_candidate(), victim_url="/view?content=ok"), manifest).verdict, ReceiptVerdict.ACCEPTED)
         plain = _manifest(extension_path_budget=0)
         self.assertEqual(verifier.verify(replace(_candidate(), victim_url="/admin/media.php?sid=1"), plain).verdict, ReceiptVerdict.ACCEPTED)
@@ -936,10 +933,10 @@ class ReceiptModelTests(unittest.TestCase):
             ReceiptVerdict.ACCEPTED,
         )
         login_sid = replace(_candidate(), victim_login=(LoginStep("goto", path="/login?sid=1"),))
-        self.assertEqual(verifier.verify(login_sid, plain).primary.reason, "VICTIM_URL_AUTH_PARAMETER")
+        self.assertEqual(verifier.verify(login_sid, plain).paths[0].reason, "VICTIM_URL_AUTH_PARAMETER")
         listed = replace(plain, auth_query_params=("sid",))
         self.assertEqual(
-            verifier.verify(replace(_candidate(), victim_url="/admin/media.php?sid=1"), listed).primary.reason,
+            verifier.verify(replace(_candidate(), victim_url="/admin/media.php?sid=1"), listed).paths[0].reason,
             "VICTIM_URL_AUTH_PARAMETER",
         )
 
@@ -1094,9 +1091,9 @@ class ReceiptVerificationTests(unittest.TestCase):
             _candidate(), _manifest(extension_path_budget=1)
         )
         self.assertEqual(result.verdict, ReceiptVerdict.ACCEPTED)
-        self.assertEqual(result.primary.path_id, "author-to-admin")
-        self.assertEqual(len(result.extensions), 1)
-        self.assertEqual(result.extensions[0].path_id, "editor-to-admin")
+        self.assertEqual(result.paths[0].path_id, "author-to-admin")
+        self.assertEqual(len(result.paths[1:]), 1)
+        self.assertEqual(result.paths[1:][0].path_id, "editor-to-admin")
         self.assertEqual(len(attacker.tokens), 2)
         self.assertEqual(len(set(attacker.tokens)), 2)
         self.assertEqual(attacker.tokens, browser.tokens)
@@ -1109,12 +1106,12 @@ class ReceiptVerificationTests(unittest.TestCase):
             _candidate(), _manifest(extension_path_budget=1)
         )
         self.assertEqual(result.verdict, ReceiptVerdict.REJECTED)
-        self.assertEqual(result.primary.reason, "NO_BROWSER_BOUND_RECEIPT")
+        self.assertEqual(result.paths[0].reason, "NO_BROWSER_BOUND_RECEIPT")
         feedback = receipt_agent_feedback("001-receipt-xss", result)
         self.assertEqual(feedback["reason"], "NO_BROWSER_BOUND_RECEIPT")
         self.assertEqual(feedback["reason_description"], "The victim browser did not receive a valid execution receipt.")
-        self.assertEqual(len(result.extensions), 1)
-        self.assertEqual(result.extensions[0].verdict, ReceiptVerdict.REJECTED)
+        self.assertEqual(len(result.paths[1:]), 1)
+        self.assertEqual(result.paths[1:][0].verdict, ReceiptVerdict.REJECTED)
         self.assertEqual(len(attacker.tokens), 2)
 
     def test_extension_acceptance_after_primary_attacker_failure(self) -> None:
@@ -1139,11 +1136,11 @@ class ReceiptVerificationTests(unittest.TestCase):
         result = ReceiptVerifier(adapter=adapter, attacker=attacker, browser=browser, receipt_key=b"k" * 32).verify(
             _candidate(), _manifest()
         )
-        self.assertEqual(result.primary.verdict, ReceiptVerdict.REJECTED)
-        self.assertEqual(result.extensions[0].verdict, ReceiptVerdict.ACCEPTED)
+        self.assertEqual(result.paths[0].verdict, ReceiptVerdict.REJECTED)
+        self.assertEqual(result.paths[1:][0].verdict, ReceiptVerdict.ACCEPTED)
         self.assertEqual(result.verdict, ReceiptVerdict.ACCEPTED)
         self.assertEqual(result.public_mapping()["verdict"], "ACCEPTED")
-        paths = [result.public_mapping()["primary"], *result.public_mapping()["extensions"]]
+        paths = result.public_mapping()["paths"]
         self.assertEqual([(p["attacker_principal"], p["victim_principal"], p["verdict"]) for p in paths], [
             ("author-1", "admin-1", "REJECTED"), ("editor-1", "admin-1", "ACCEPTED"),
         ])
@@ -1166,7 +1163,7 @@ class ReceiptVerificationTests(unittest.TestCase):
             _candidate(), _manifest()
         )
         self.assertEqual(result.verdict, ReceiptVerdict.INDETERMINATE)
-        self.assertEqual(result.primary.reason, "ATTACKER_TIMEOUT")
+        self.assertEqual(result.paths[0].reason, "ATTACKER_TIMEOUT")
         feedback = receipt_agent_feedback("001-receipt-xss", result)
         self.assertEqual(feedback["reason"], "ATTACKER_TIMEOUT")
         self.assertEqual(feedback["reason_description"], "The attacker script exceeded the execution time limit.")
@@ -1196,13 +1193,13 @@ class ReceiptVerificationTests(unittest.TestCase):
         progress = []
         result = verifier.verify(_candidate(), _manifest(), on_path_complete=lambda done, total: progress.append((done, total)))
         self.assertEqual(progress, [(1, 2), (2, 2)])
-        self.assertEqual(len(result.extensions), 1)
+        self.assertEqual(len(result.paths[1:]), 1)
 
         def broken_progress(done, total):
             raise RuntimeError("notification failed")
 
         result = verifier.verify(_candidate(), _manifest(), on_path_complete=broken_progress)
-        self.assertEqual(result.primary.reason, "NO_BROWSER_BOUND_RECEIPT")
+        self.assertEqual(result.paths[0].reason, "NO_BROWSER_BOUND_RECEIPT")
 
     def test_only_selected_paths_run_for_every_verdict(self) -> None:
         manifest = _manifest()
@@ -1221,9 +1218,13 @@ class ReceiptVerificationTests(unittest.TestCase):
                 with patch.object(verifier, '_verify_path', side_effect=run) as replay:
                     result = verifier.verify(_candidate(), manifest, preferred_path_ids=(extension.id,))
                 self.assertEqual([call.args[2].id for call in replay.call_args_list], [extension.id])
-                self.assertEqual(result.primary.verdict, ReceiptVerdict.NOT_RUN)
-                self.assertEqual(result.primary.reason, 'PATH_NOT_SELECTED')
+                self.assertEqual(result.paths[0].verdict, ReceiptVerdict.NOT_RUN)
+                self.assertEqual(result.paths[0].reason, 'PATH_NOT_SELECTED')
                 self.assertEqual(result.verdict, selected_verdict)
+                mapping = result.public_mapping()
+                self.assertEqual([item['path_id'] for item in mapping['paths']], [primary.id, extension.id])
+                self.assertNotIn('primary', mapping)
+                self.assertNotIn('extensions', mapping)
         with patch.object(verifier, '_verify_path', side_effect=lambda candidate, model, path, attempt:
                           PathResult(path.id, ReceiptVerdict.REJECTED, 'test')) as replay:
             result = verifier.verify(_candidate(), manifest, preferred_path_ids=('not-in-manifest',))
@@ -1245,11 +1246,11 @@ class ReceiptVerificationTests(unittest.TestCase):
             with self.subTest(accepted=accepted):
                 attacker = _Attacker()
                 result = ReceiptVerifier(adapter=_Adapter(), attacker=attacker, browser=_Browser(accepted)).verify(
-                    _candidate(), manifest, preferred_path_ids=(manifest.primary_path.id,)
+                    _candidate(), manifest, preferred_path_ids=(manifest.threat_paths[0].id,)
                 )
                 self.assertEqual(len(attacker.tokens), 1)
-                self.assertEqual(len(result.extensions), 1)
-                skipped = result.extensions[0]
+                self.assertEqual(len(result.paths[1:]), 1)
+                skipped = result.paths[1:][0]
                 self.assertEqual(skipped.path_id, manifest.threat_paths[1].id)
                 self.assertEqual(skipped.verdict, ReceiptVerdict.NOT_RUN)
                 self.assertEqual(skipped.reason, "PATH_NOT_SELECTED")
@@ -1258,6 +1259,19 @@ class ReceiptVerificationTests(unittest.TestCase):
                 self.assertEqual(result.verdict, ReceiptVerdict.ACCEPTED if accepted else ReceiptVerdict.REJECTED)
                 feedback = receipt_agent_feedback("001-receipt-xss", result)
                 self.assertNotIn(skipped.path_id, str(feedback))
+
+    def test_signature_covers_all_path_results(self) -> None:
+        import hashlib
+        import hmac
+
+        key = b"k" * 32
+        result = ReceiptVerifier(adapter=_Adapter(), attacker=_Attacker(), browser=_Browser(), receipt_key=key).verify(
+            _candidate(), _manifest()
+        )
+        mapping = result.public_mapping()
+        payload = {name: mapping[name] for name in ("candidate_hash", "manifest_hash", "paths")}
+        expected = hmac.new(key, json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(), hashlib.sha256).hexdigest()
+        self.assertEqual(mapping["receipt_hmac"], expected)
 
     def test_budget_preserves_primary_first_and_records_all_remaining_paths(self) -> None:
         manifest = _manifest()
@@ -1269,10 +1283,10 @@ class ReceiptVerificationTests(unittest.TestCase):
             path.id, ReceiptVerdict.REJECTED, "NO_BROWSER_BOUND_RECEIPT"
         )) as replay:
             result = verifier.verify(_candidate(), manifest, attempt=3)
-        self.assertEqual([call.args[2].id for call in replay.call_args_list], [primary.id, extension.id, third.id])
+        self.assertEqual([call.args[2].id for call in replay.call_args_list], [extension.id, primary.id, third.id])
         self.assertTrue(all(call.args[3] == 3 for call in replay.call_args_list))
-        self.assertEqual([path.path_id for path in result.extensions], [extension.id, third.id])
-        self.assertEqual(result.extensions[-1].verdict, ReceiptVerdict.REJECTED)
+        self.assertEqual([path.path_id for path in result.paths], [extension.id, primary.id, third.id])
+        self.assertEqual(result.paths[1:][-1].verdict, ReceiptVerdict.REJECTED)
         self.assertEqual(result.verdict, ReceiptVerdict.REJECTED)
 
     def test_feedback_uses_extension_infrastructure_failure_and_its_diagnostics(self) -> None:
@@ -1281,7 +1295,7 @@ class ReceiptVerificationTests(unittest.TestCase):
         manifest = _manifest()
         verifier = ReceiptVerifier(adapter=_Adapter(), attacker=_Attacker(), browser=_Browser())
         results = [
-            PathResult(manifest.primary_path.id, ReceiptVerdict.REJECTED, "ATTACKER_FAILED"),
+            PathResult(manifest.threat_paths[0].id, ReceiptVerdict.REJECTED, "ATTACKER_FAILED"),
             PathResult(manifest.threat_paths[1].id, ReceiptVerdict.INDETERMINATE, "BROWSER_ERROR", evidence={
                 "browser_error": {"stage": "victim_action", "type": "playwright_timeout", "action_index": 1},
             }),
@@ -1294,7 +1308,7 @@ class ReceiptVerificationTests(unittest.TestCase):
         self.assertIn("index: 1", feedback["reason_description"])
         self.assertIn("ATTACKER_FAILED", feedback["reason_description"])
         self.assertIn("BROWSER_ERROR", feedback["reason_description"])
-        self.assertNotIn(manifest.primary_path.id, str(feedback))
+        self.assertNotIn(manifest.threat_paths[0].id, str(feedback))
         self.assertNotIn(manifest.threat_paths[1].id, str(feedback))
 
     def test_feedback_groups_distinct_victim_outcomes_without_path_ids(self) -> None:
@@ -1305,8 +1319,8 @@ class ReceiptVerificationTests(unittest.TestCase):
         result = ReceiptResult(
             "candidate",
             "manifest",
-            PathResult("path-admin", ReceiptVerdict.REJECTED, "NO_BROWSER_BOUND_RECEIPT", victim_principal="admin-account"),
             (
+                PathResult("path-admin", ReceiptVerdict.REJECTED, "NO_BROWSER_BOUND_RECEIPT", victim_principal="admin-account"),
                 PathResult(
                     "path-user",
                     ReceiptVerdict.INDETERMINATE,
@@ -1357,11 +1371,11 @@ class ReceiptVerificationTests(unittest.TestCase):
 
         manifest = _manifest(extension_path_budget=0)
         result = ReceiptVerifier(adapter=_Adapter(), attacker=_Attacker(), browser=Driver(), receipt_key=b"k" * 32).verify(
-            _candidate(), manifest, preferred_path_ids=(manifest.primary_path.id,)
+            _candidate(), manifest, preferred_path_ids=(manifest.threat_paths[0].id,)
         )
         self.assertEqual(result.verdict, ReceiptVerdict.REJECTED)
-        self.assertEqual(result.primary.reason, "BROWSER_ERROR")
-        self.assertEqual(result.primary.evidence["browser_error"], {
+        self.assertEqual(result.paths[0].reason, "BROWSER_ERROR")
+        self.assertEqual(result.paths[0].evidence["browser_error"], {
             "stage": "victim_action",
             "type": "playwright_timeout",
             "action_index": 1,
@@ -1374,7 +1388,7 @@ class ReceiptVerificationTests(unittest.TestCase):
         manifest = _manifest()
         verifier = ReceiptVerifier(adapter=_Adapter(), attacker=_Attacker(), browser=_Browser())
         results = [
-            PathResult(manifest.primary_path.id, ReceiptVerdict.INDETERMINATE, "ADAPTER_ERROR"),
+            PathResult(manifest.threat_paths[0].id, ReceiptVerdict.INDETERMINATE, "ADAPTER_ERROR"),
             PathResult(manifest.threat_paths[1].id, ReceiptVerdict.REJECTED, "ATTACKER_EVIDENCEMISSING"),
         ]
         with patch.object(verifier, "_verify_path", side_effect=results):
@@ -1384,7 +1398,7 @@ class ReceiptVerificationTests(unittest.TestCase):
         self.assertEqual(feedback["reason"], "ADAPTER_ERROR")
         self.assertIn("no evidence was observed", feedback["reason_description"])
         self.assertIn("expected response", feedback["next_step"])
-        self.assertNotIn(manifest.primary_path.id, str(feedback))
+        self.assertNotIn(manifest.threat_paths[0].id, str(feedback))
         self.assertNotIn(manifest.threat_paths[1].id, str(feedback))
 
     def test_adapter_error_feedback_reports_a_completed_browser_rejection(self) -> None:
@@ -1393,7 +1407,7 @@ class ReceiptVerificationTests(unittest.TestCase):
         manifest = _manifest()
         verifier = ReceiptVerifier(adapter=_Adapter(), attacker=_Attacker(), browser=_Browser())
         results = [
-            PathResult(manifest.primary_path.id, ReceiptVerdict.INDETERMINATE, "ADAPTER_ERROR"),
+            PathResult(manifest.threat_paths[0].id, ReceiptVerdict.INDETERMINATE, "ADAPTER_ERROR"),
             PathResult(
                 manifest.threat_paths[1].id,
                 ReceiptVerdict.REJECTED,
@@ -1421,7 +1435,7 @@ class ReceiptVerificationTests(unittest.TestCase):
             _candidate(), _manifest(extension_path_budget=0)
         )
         self.assertEqual(result.verdict, ReceiptVerdict.INDETERMINATE)
-        self.assertEqual(result.primary.reason, "ATTACKER_KILLED")
+        self.assertEqual(result.paths[0].reason, "ATTACKER_KILLED")
         feedback = receipt_agent_feedback("001-receipt-xss", result)
         self.assertEqual(feedback["reason"], "ATTACKER_KILLED")
         self.assertIn("runtime limit", feedback["reason_description"])
@@ -1515,7 +1529,7 @@ class CallbackFixtureTests(unittest.TestCase):
                     return Mock(returncode=0, stdout="0\n", stderr="")
                 return Mock(returncode=0, stdout="container\n", stderr="")
 
-            with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
                 executor = DockerAttackerExecutor(image="test-image", poclib_file=poclib_file)
                 with patch("app.receipt.is_pinned_attacker_image", return_value=True), patch("app.receipt.subprocess.run", side_effect=fake_run):
                     try:
@@ -1533,7 +1547,7 @@ class CallbackFixtureTests(unittest.TestCase):
                 captured.append(list(command))
                 return Mock(returncode=0, stdout="", stderr="")
 
-            with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
                 executor = DockerAttackerExecutor(image="test-image", poclib_file=poclib_file)
                 with patch("app.receipt.is_pinned_attacker_image", return_value=True), patch("app.receipt.subprocess.run", side_effect=blocking_run):
                     blocking_ok, blocking_reason = executor.run(_candidate(), target, "challenge", 1)
@@ -1573,7 +1587,7 @@ class CallbackFixtureTests(unittest.TestCase):
                     return Mock(returncode=0, stdout="false\n", stderr="")
                 return Mock(returncode=0, stdout="container\n", stderr="")
 
-            with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
                 executor = DockerAttackerExecutor(image="test-image", poclib_file=poclib_file)
                 with patch("app.receipt.is_pinned_attacker_image", return_value=True), patch("app.receipt.subprocess.run", side_effect=fake_run):
                     try:
@@ -1591,7 +1605,7 @@ class CallbackFixtureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             poclib_file = Path(directory) / "poclib.py"
             poclib_file.write_text("pass\n", encoding="utf-8")
-            with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
                 executor = DockerAttackerExecutor(image="test-image", poclib_file=poclib_file)
                 with patch("app.receipt.is_pinned_attacker_image", return_value=True), patch("app.receipt.subprocess.run", side_effect=AssertionError("docker")):
                     ok, reason = executor.run(_candidate_with_callback(), target, "challenge", 1)
@@ -1610,7 +1624,7 @@ class CallbackFixtureTests(unittest.TestCase):
             poclib_file = Path(ready) / "poclib.py"
             poclib_file.write_text("pass\n", encoding="utf-8")
             (Path(ready) / "callback_supervisor.py").write_text("pass\n", encoding="utf-8")
-            with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+            with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
                 executor = DockerAttackerExecutor(image="test-image", poclib_file=poclib_file)
                 with patch("app.receipt.is_pinned_attacker_image", return_value=True), patch("app.receipt.subprocess.run", side_effect=still_running), patch("app.receipt.time.monotonic", side_effect=[0, 5]):
                     try:
@@ -1774,7 +1788,7 @@ class CallbackFixtureTests(unittest.TestCase):
         rejected = ReceiptVerifier(adapter=_Adapter(), attacker=FailedAttacker(), browser=UnexpectedBrowser(), receipt_key=b"k" * 32).verify(
             _candidate_with_callback(), _manifest(extension_path_budget=0)
         )
-        self.assertEqual(rejected.primary.verdict, ReceiptVerdict.REJECTED)
+        self.assertEqual(rejected.paths[0].verdict, ReceiptVerdict.REJECTED)
         self.assertEqual(failed, ["run", "stop", "run", "stop"])
 
     def test_routes_without_a_script_still_start_the_attacker_container(self) -> None:
@@ -1931,8 +1945,8 @@ class ReceiptRepairTests(unittest.TestCase):
             adapter=_Adapter(), attacker=_Attacker(), browser=FailedBrowser(), receipt_key=b"k" * 32,
         ).verify(_candidate(), _manifest(extension_path_budget=0))
         self.assertEqual(result.verdict, ReceiptVerdict.REJECTED)
-        self.assertEqual(result.primary.evidence["browser_error"]["blocker"], "not_found")
-        self.assertEqual(result.primary.evidence["browser_error"]["step"], "victim_login.assert_visible")
+        self.assertEqual(result.paths[0].evidence["browser_error"]["blocker"], "not_found")
+        self.assertEqual(result.paths[0].evidence["browser_error"]["step"], "victim_login.assert_visible")
 
     def test_bundle_revalidation_stays_indeterminate(self) -> None:
         class BundleBrowser:
@@ -1944,7 +1958,7 @@ class ReceiptRepairTests(unittest.TestCase):
             adapter=_Adapter(), attacker=_Attacker(), browser=BundleBrowser(), receipt_key=b"k" * 32,
         ).verify(_candidate(), _manifest(extension_path_budget=0))
         self.assertEqual(result.verdict, ReceiptVerdict.INDETERMINATE)
-        self.assertEqual(result.primary.reason, "RECEIPT_BUNDLE_INVALID")
+        self.assertEqual(result.paths[0].reason, "RECEIPT_BUNDLE_INVALID")
 
     def _job(self, validation_base: str) -> dict:
         return {
@@ -2053,9 +2067,9 @@ class ReceiptRepairTests(unittest.TestCase):
         package = types.ModuleType("playwright")
         package.sync_api = api
         manifest = _manifest(extension_path_budget=0)
-        with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+        with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
             with patch.dict(sys.modules, {"playwright": package, "playwright.sync_api": api}):
-                evidence = PlaywrightVictimDriver().run(_candidate(), target, manifest.primary_path, secret, 1000)
+                evidence = PlaywrightVictimDriver().run(_candidate(), target, manifest.threat_paths[0], secret, 1000)
         self.assertTrue(evidence.accepted)
         self.assertEqual(evidence.document_origin, "http://target.test")
         self.assertIn("__receipt_accept", str(calls["script"]))
@@ -2138,9 +2152,9 @@ class ReceiptRepairTests(unittest.TestCase):
         package = types.ModuleType("playwright")
         package.sync_api = api
         manifest = _manifest(extension_path_budget=0)
-        with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+        with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
             with patch.dict(sys.modules, {"playwright": package, "playwright.sync_api": api}):
-                evidence = PlaywrightVictimDriver().run(_candidate(), target, manifest.primary_path, secret, 200)
+                evidence = PlaywrightVictimDriver().run(_candidate(), target, manifest.threat_paths[0], secret, 200)
         self.assertFalse(evidence.accepted)
         self.assertEqual(evidence.reason, "NO_BROWSER_BOUND_RECEIPT")
 
@@ -2226,9 +2240,9 @@ class ReceiptRepairTests(unittest.TestCase):
         package = types.ModuleType("playwright")
         package.sync_api = api
         manifest = _manifest(extension_path_budget=0)
-        with _Adapter().open_run(manifest, manifest.primary_path, "run") as target:
+        with _Adapter().open_run(manifest, manifest.threat_paths[0], "run") as target:
             with patch.dict(sys.modules, {"playwright": package, "playwright.sync_api": api}):
-                evidence = PlaywrightVictimDriver().run(_candidate(), target, manifest.primary_path, "receipt-token", 1000)
+                evidence = PlaywrightVictimDriver().run(_candidate(), target, manifest.threat_paths[0], "receipt-token", 1000)
         self.assertEqual(evidence.reason, "BROWSER_ERROR")
         self.assertEqual(evidence.error_type, "playwright_error")
         self.assertEqual(evidence.error_stage, "victim_action")
@@ -2304,7 +2318,7 @@ document.getElementById('js').onclick = () => window.open('javascript:void(windo
         from app.receipt import ThreatPath, VictimAction
 
         candidate = replace(_candidate(), victim_url="/", victim_actions=(VictimAction("click", selector),))
-        path = ThreatPath("author-to-admin", "author-1", "admin-1", True, False)
+        path = ThreatPath("author-to-admin", "author-1", "admin-1", False)
         target = TargetRun(
             run_id="live",
             base_url=origin + "/",

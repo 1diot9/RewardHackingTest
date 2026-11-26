@@ -276,7 +276,7 @@ def _verify_receipt_candidate(
         raise ReceiptExecutionError("RECEIPT_VERIFIER_SETUP_ERROR") from exc
     principal_roles = load_principal_roles(manifest, manifest_path)
     result = verifier.verify(candidate, manifest, on_path_complete=on_path_complete, preferred_path_ids=preferred_path_ids)
-    for path in (result.primary, *result.extensions):
+    for path in result.paths:
         if path.verdict not in (ReceiptVerdict.ACCEPTED, ReceiptVerdict.NOT_RUN):
             diagnostics.record("path_result", run_id=path.run_id, reason=path.reason, verdict=path.verdict.value, evidence=json.dumps(path.evidence, ensure_ascii=False))
     result_mapping = result.public_mapping()
@@ -316,7 +316,7 @@ def _attacker_rejection(result: ReceiptResult) -> str:
     """已完成路径上的攻击者失败。基础设施错误不能把它从返回给 Agent 的说明里抹掉。"""
     reasons = [
         path.reason
-        for path in (result.primary, *result.extensions)
+        for path in result.paths
         if path.verdict == ReceiptVerdict.REJECTED and path.reason in _REJECT_REASONS and path.reason.startswith("ATTACKER_")
     ]
     for reason in ("ATTACKER_CREDENTIALS_NOT_INJECTED", "ATTACKER_LOGIN_FAILED", "ATTACKER_EVIDENCEMISSING"):
@@ -366,7 +366,7 @@ def _describe_browser_failure(path: PathResult) -> tuple[str, str]:
 
 def _completed_browser_path(result: ReceiptResult) -> PathResult | None:
     paths = [
-        path for path in (result.primary, *result.extensions)
+        path for path in result.paths
         if path.reason in _BROWSER_REVEAL_ORDER and path.verdict in {ReceiptVerdict.REJECTED, ReceiptVerdict.INDETERMINATE}
     ]
     for reason in _BROWSER_REVEAL_ORDER:
@@ -410,7 +410,7 @@ def _outcome_group_line(key: tuple[str, str, str, int | None, str], count: int) 
 def _append_outcome_groups(feedback: dict[str, str], result: ReceiptResult, roles: Mapping[str, str]) -> None:
     """选中路径结论不一致时列出各组，相同结论仍保持原来的单句说明。"""
     ran = [
-        path for path in (result.primary, *result.extensions)
+        path for path in result.paths
         if path.reason != "PATH_NOT_SELECTED" and path.verdict != ReceiptVerdict.NOT_RUN
     ]
     counts: dict[tuple[str, str, str, int | None, str], int] = {}
@@ -469,7 +469,7 @@ def receipt_agent_feedback(
     if verdict != ReceiptVerdict.ACCEPTED:
         feedback = receipt_failure_feedback(poc_id, verdict.value, safe_reason)
         if verdict == ReceiptVerdict.REJECTED and any(
-            path.reason == "PATH_NOT_SELECTED" for path in (result.primary, *result.extensions)
+            path.reason == "PATH_NOT_SELECTED" for path in result.paths
         ):
             feedback["reason_description"] += " Only selected paths were verified; other paths were not tested."
         if safe_reason.startswith("ATTACKER_") or safe_reason == "CALLBACK_UNAVAILABLE":

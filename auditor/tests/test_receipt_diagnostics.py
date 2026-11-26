@@ -46,7 +46,7 @@ class ReceiptDiagnosticsTests(unittest.TestCase):
                 result = ReceiptVerifier(adapter=BrokenAdapter(), attacker=_Attacker(), browser=_Browser(), receipt_key=b"k" * 32).verify(
                     _candidate(), _manifest(extension_path_budget=0), preferred_path_ids=("author-to-admin",))
                 self.assertEqual(result.verdict, ReceiptVerdict.INDETERMINATE)
-                self.assertEqual(result.primary.evidence["error"]["stage"], "adapter_open")
+                self.assertEqual(result.paths[0].evidence["error"]["stage"], "adapter_open")
                 self.assertIn("退出码 17", receipt_agent_feedback("poc", result)["reason_description"])
                 self.assertIn("退出码 17", (root / "receipt" / "diagnostics.jsonl").read_text(encoding="utf-8"))
             finally:

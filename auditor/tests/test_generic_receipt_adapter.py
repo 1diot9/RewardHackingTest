@@ -118,7 +118,7 @@ class GenericAdapterTests(unittest.TestCase):
             with mock.patch('app.generic_receipt_adapter._run', side_effect=run), \
                  mock.patch('app.generic_receipt_adapter._login_cookie_header', return_value='session=attacker') as cookie_login, \
                  mock.patch('app.generic_receipt_adapter._login', return_value=True) as victim_login:
-                with GenericComposeAdapter(root).open_run(manifest(), manifest().primary_path, 'a' * 32) as target:
+                with GenericComposeAdapter(root).open_run(manifest(), manifest().threat_paths[0], 'a' * 32) as target:
                     self.assertEqual(target.attacker_base_url, 'http://target:8080/')
                     self.assertEqual(target.attacker_cookie_header, '')
                     self.assertEqual(target.login_attacker(login_steps), 'session=attacker')
@@ -171,7 +171,7 @@ class GenericAdapterTests(unittest.TestCase):
 
             with mock.patch('app.generic_receipt_adapter._run', side_effect=run), \
                  mock.patch('app.generic_receipt_adapter._login_cookie_header', return_value='session=attacker') as cookie_login:
-                with GenericComposeAdapter(root).open_run(secured, secured.primary_path, 'a' * 32) as target:
+                with GenericComposeAdapter(root).open_run(secured, secured.threat_paths[0], 'a' * 32) as target:
                     self.assertEqual(target.victim_http_credentials, {'username': 'reader', 'password': 'secret2'})
                     self.assertEqual(target.login_attacker(()), '')
                     self.assertEqual(target.login_attacker(login_steps), 'session=attacker')
@@ -194,7 +194,7 @@ class GenericAdapterTests(unittest.TestCase):
                 return ''
             with mock.patch('app.generic_receipt_adapter._run', side_effect=run):
                 with self.assertRaises(ReceiptError):
-                    with GenericComposeAdapter(root).open_run(manifest(), manifest().primary_path, 'a' * 32):
+                    with GenericComposeAdapter(root).open_run(manifest(), manifest().threat_paths[0], 'a' * 32):
                         self.fail('must not yield')
             self.assertEqual(calls[-1][-1], '--cleanup')
 
@@ -219,7 +219,7 @@ class GenericAdapterTests(unittest.TestCase):
                 return ''
 
             with mock.patch('app.generic_receipt_adapter._run', side_effect=run):
-                with GenericComposeAdapter(root).open_run(manifest(), manifest().primary_path, 'a' * 32) as target:
+                with GenericComposeAdapter(root).open_run(manifest(), manifest().threat_paths[0], 'a' * 32) as target:
                     self.assertEqual(target.attacker_base_url, 'http://target:8080/')
 
     def test_cleanup_failure_preserves_start_error(self):
@@ -234,7 +234,7 @@ class GenericAdapterTests(unittest.TestCase):
 
             with mock.patch('app.generic_receipt_adapter._run', side_effect=run):
                 with self.assertRaises(ReceiptError) as caught:
-                    with GenericComposeAdapter(root).open_run(manifest(), manifest().primary_path, 'a' * 32):
+                    with GenericComposeAdapter(root).open_run(manifest(), manifest().threat_paths[0], 'a' * 32):
                         self.fail('must not yield')
             self.assertIn('start failed', str(caught.exception))
 
@@ -257,7 +257,7 @@ class GenericAdapterTests(unittest.TestCase):
                 return ''
             with mock.patch('app.generic_receipt_adapter._run', side_effect=run):
                 with self.assertRaises(ReceiptError):
-                    with GenericComposeAdapter(root).open_run(manifest(), manifest().primary_path, 'a' * 32):
+                    with GenericComposeAdapter(root).open_run(manifest(), manifest().threat_paths[0], 'a' * 32):
                         self.fail('must not yield')
             self.assertEqual(calls[-1][-1], '--cleanup')
             self.assertFalse(any('create' in command and 'network' in command for command in calls))

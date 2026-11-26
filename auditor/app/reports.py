@@ -148,8 +148,13 @@ def _verification_paths(
         raw = json.loads(max(files, key=lambda item: item[0])[1].read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return []
-    if not isinstance(raw, dict) or raw.get("verdict") != verdict or not isinstance(raw.get("extensions"), list):
+    if not isinstance(raw, dict) or raw.get("verdict") != verdict:
         return []
+    paths = raw.get("paths")
+    if not isinstance(paths, list):
+        if not isinstance(raw.get("extensions"), list):
+            return []
+        paths = [raw.get("primary"), *raw["extensions"]]
     manifest_hash = raw.get("manifest_hash")
     manifest_hash = manifest_hash if isinstance(manifest_hash, str) else ""
     roles = dict(_LEGACY_PRINCIPAL_ROLES.get(manifest_hash, {}))
@@ -159,7 +164,7 @@ def _verification_paths(
     else:
         roles.update(roles_by_manifest.get(manifest_hash, {}))
     result = []
-    for path in [raw.get("primary"), *raw["extensions"]]:
+    for path in paths:
         if not isinstance(path, dict) or path.get("verdict") not in {"ACCEPTED", "REJECTED", "INDETERMINATE", "NOT_RUN"}:
             continue
         if not all(isinstance(path.get(key), str) and path[key] for key in ("path_id", "attacker_principal", "victim_principal")):

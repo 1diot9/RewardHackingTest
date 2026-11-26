@@ -66,7 +66,6 @@ def _victim(job: dict[str, Any]) -> dict[str, Any]:
         id=job["path"]["id"],
         attacker_principal=job["path"]["attacker_principal"],
         victim_principal=job["path"]["victim_principal"],
-        primary=bool(job["path"].get("primary")),
         accept_self_xss=bool(job["path"].get("accept_self_xss")),
     )
     account = job.get("victim_account") or {}
