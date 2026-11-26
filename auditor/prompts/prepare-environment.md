@@ -23,9 +23,11 @@
 - 脚本非交互式执行、错误时返回非零，并输出不含凭据的可诊断错误；调用外部命令时检查退出码并设置超时。脚本可重复运行，且不能操作其他实例。
 - 系统为每次运行提供 `RECEIPT_RUN_ID`（32 位十六进制）、`RECEIPT_RUN_DIR`（独立临时目录绝对路径）和 `COMPOSE_PROJECT_NAME=receipt-<运行ID>`。所有脚本必须使用该项目名，只在该目录中保存运行时数据，不能使用固定端口或固定容器名；宿主机端口只能绑定 127.0.0.1 并由 Docker 自动分配。账号创建脚本将 `receipt-run.json` 写入 `RECEIPT_RUN_DIR`：`{"base_url":"http://127.0.0.1:<实际端口>/","accounts":{"<account_id>":{"username":"...","password":"..."}}}`，覆盖 Manifest 中所有账号。需要向容器传递凭据时，可以在 `RECEIPT_RUN_DIR` 内使用仅限本实例的临时文件；不得在该目录外保存凭据，也不得输出凭据。清理仅删除该运行的资源及临时文件。
 
-先调用 `role-cluster-extractor` 子 Agent，只读分析源码中的角色定义、使用位置和权限边界；核对其候选结果并在 READY.md 记录角色、源码路径和行号、判断依据及不确定性。角色允许遗漏，不要为满足自动推断而虚构角色；子 Agent 不可用时自行分析并记录局限。
+只读分析源码中的角色定义、使用位置和权限边界，在 READY.md 记录角色、源码路径和行号、判断依据及不确定性。依据权限语义识别角色，不要虚构角色。
 
-`role-inventory.json` 只记录角色，不选择攻击者。根对象只能包含 `roles` 和 `clusters`。`roles` 每项只能包含 `id`、`literal`、`scope`：`id` 和 `scope` 使用字母、数字、下划线和连字符，`literal` 是源码里的角色字面量。`clusters` 每项只能包含 `id`、`evidence`、`role_ids`。每个角色至少进入一个簇。能在源码中定位的角色定义使用 `evidence.kind` 为 `source`，`path` 是相对导入源码根的路径，`literal` 必须是该簇某个角色的字面量；依据语义判断同级角色，不要将函数参数或 default 填入角色。同一角色出现在多个角色体系中时，可分别成簇。仓库内的 `SECURITY.md` 也用 `source`。外部网页用 `official_doc`，历史公告用 `historical_advisory`，资料不足用 `assumption`；这三类会在创建审计前要求人工确认，不要把它们改写成 `source`。证据对象只能包含 `kind`、`path`、`literal`。
+`role-inventory.json` 只记录角色，不选择攻击者。根对象只能包含 `roles`；每项只能包含 `id`、`literal`、`scope`：`id` 和 `scope` 使用字母、数字、下划线和连字符，`literal` 是源码里的角色字面量。不要将函数参数或普通变量当作角色。
+
+决策中的证据对象只能包含 `kind`、`path`、`literal`。源码或仓库内的 `SECURITY.md` 使用 `source`，`path` 是相对导入源码根的路径；外部网页用 `official_doc`，历史公告用 `historical_advisory`，资料不足用 `assumption`。需要人工确认的资料不要改写成 `source`。
 
 `threat-decisions.json` 给清单中的每个角色恰好一种处置。根对象只能包含 `roles`、`victims`、`paths`、`boundaries`。`roles` 每项只能包含 `id`、`disposition`、`reason`、`evidence`；`disposition` 只能是 `include`、`victim_only` 或 `exclude`，`reason` 为非空单行说明。`victims` 每项只能包含 `role_id`、`account_id`、`scope`，`scope` 必须与角色清单一致。`paths` 每项只能包含 `id`、`attacker_role`、`victim_role`、`attacker_account`、`victim_account`、`scope`、`primary`、`accept_self_xss`。攻击者的处置必须是 `include`，受害者必须出现在 `victims` 中，作用域三方一致，且恰好一条路径的 `primary` 为 true。同一作用域内，每个 `include` 角色与每个其他候选受害者的格子，要么有一条路径，要么在 `boundaries` 中有一项无边界说明；`boundaries` 每项只能包含 `attacker_role`、`victim_role`、`scope`、`reason`、`evidence`。`include` 的角色至少有一条攻击路径。跨用户路径的两个账号必须不同；只有确需 self-XSS 时才把 `accept_self_xss` 设为 true，且双方使用同一账号。
 
@@ -42,7 +44,7 @@
 - 按具体资源、作用域和受害者判断：明确各角色能直接执行什么操作、能否控制受害者账号或会话，以及能否访问所声称受影响的资产。默认可将拥有相关实例或租户完全控制权的最高管理员视为该控制范围内的可信主体；其他具有合理攻击能力的角色，包括较低级管理员、资源 Owner 和 Creator，均应考虑作为攻击者。最高管理员对控制范围之外的用户、租户或资产构成威胁时，也应单独考虑。
 - 若只有一种管理员级别，检查其对普通用户账号、会话及相关资产的实际控制能力；只有成员管理、禁用或重置等权限不必然等同于取得用户会话或控制所有资产。对其不能直接控制的受害者或资产存在有意义边界时，应将该管理员纳入对应攻击路径；资料不足时保留合理的候选路径并标明假设。
 - 为审计目标涉及的不同权限和受害者准备可实际使用的攻击路径及账号；优先覆盖低权限攻击者，同时覆盖有意义的高权限跨用户、跨角色或跨资源路径。一个角色可以在不同路径中分别担任攻击者或受害者，但每条跨用户路径的双方必须是不同的实际账号，避免别名指向同一账号；仅确需测试 self-XSS 时才显式设置 `accept_self_xss: true`。角色账号应只具有对应作用域所需的权限；若引导账号不可避免地叠加更高权限，单独记录并尽可能创建不带额外权限的账号。受害者可为公开访问者时，应说明可在验证时省略受害者登录；Manifest 仍须引用有效身份并按固定接口准备账号。
-- 在 `READY.md` 记录各身份的实际权限和作用域、选入或排除攻击者的理由、攻击者与受害者的边界，以及引用的官方资料位置或链接、适用版本、无法确认的假设和环境限制。检查器只承认上述三个 JSON 的字段；`READY.md` 里的说明不能代替角色簇、处置或格子。不要将说明字段加入 Manifest；不得声称已有动态验证，除非有实际证据。假设和不可靠的角色簇推断会留待人工确认，不应为通过检查编造角色。
+- 在 `READY.md` 记录各身份的实际权限和作用域、选入或排除攻击者的理由、攻击者与受害者的边界，以及引用的官方资料位置或链接、适用版本、无法确认的假设和环境限制。检查器只承认上述三个 JSON 的字段；`READY.md` 里的说明不能代替角色处置或格子。不要将说明字段加入 Manifest；不得声称已有动态验证，除非有实际证据。需要确认的假设会留待人工确认，不应为通过检查编造角色。
 
 `receipt-adapter.json` 为版本 2 的 JSON，只能包含 `version`、`target_service`、`container_port` 三个字段，例如 `{"version":2,"target_service":"app","container_port":8000}`。其中 `version` 必须为 2；`target_service` 是 Compose 中实际对外提供 HTTP 的单个服务名，`container_port` 是该服务**实际监听的容器内端口**（1～65535），不是宿主机端口；示例中的服务名和端口不是固定值。优先沿用源码的正常启动方式及监听端口，避免为匹配示例额外改写启动方式。隔离攻击者通过 `http://target:<container_port>/` 访问容器，服务应监听容器可访问的地址，例如 `0.0.0.0`，不要误写成 `0.0.0.1`。Compose 在宿主机侧仅绑定 `127.0.0.1` 并由 Docker 动态分配宿主机端口。不要在该文件写地址、账号、密码、Cookie、登录页面或登录步骤。
 

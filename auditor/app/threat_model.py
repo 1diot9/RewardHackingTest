@@ -1,7 +1,7 @@
 """Check that a generated threat model is closed over the roles it cites.
 
-The checker proves a property of the files the initializer wrote: every role in a
-cited source cluster has a disposition, every included attacker has a path and an
+The checker proves a property of the files the initializer wrote: every listed
+role has a disposition, every included attacker has a path and an
 account, and the manifest is a projection of those decisions. It does not prove
 that some uncited role system is absent. Assumptions stay reviewable and do not
 fail initialization; creating an audit from the generated manifest requires an
@@ -24,7 +24,6 @@ _IDENTIFIER = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012
 _DISPOSITIONS = frozenset({"include", "victim_only", "exclude"})
 _EVIDENCE_KINDS = frozenset({"source", "official_doc", "historical_advisory", "assumption"})
 _REVIEW_KINDS = frozenset({"official_doc", "historical_advisory", "assumption"})
-_MAX_CLUSTER_TOKENS = 40
 _TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 
 
@@ -66,7 +65,6 @@ def evaluate_threat_model(environment: Path, source_dir: Path | None) -> ThreatM
         return _report(False, "incomplete", blocking, review, "")
 
     roles = _roles(inventory, blocking)
-    clusters = _clusters(inventory, roles, blocking)
     dispositions = _dispositions(decisions, roles, blocking, review)
     victims = _victims(decisions, roles, dispositions, blocking)
     paths = _paths(decisions, roles, dispositions, victims, blocking)
@@ -77,12 +75,7 @@ def evaluate_threat_model(environment: Path, source_dir: Path | None) -> ThreatM
     _script_reads_plan(environment / "create-accounts.py", blocking)
     projection = _projection(paths, plan)
     _manifest_matches(manifest_raw, projection, blocking)
-    if source_dir is None:
-        blocking.append("未提供导入源码目录，无法核对角色簇")
-        closures: list[dict[str, Any]] = []
-    else:
-        closures = _close_clusters(source_dir, clusters, roles, review, blocking)
-    digest = "" if blocking else _digest(roles, clusters, dispositions, victims, paths, boundaries, plan, projection, closures)
+    digest = "" if blocking else _digest(roles, dispositions, victims, paths, boundaries, plan, projection)
     if blocking:
         return _report(False, "incomplete", blocking, review, digest)
     status = "review_required" if review else "closed"
@@ -137,48 +130,6 @@ def _roles(inventory: dict[str, Any] | None, blocking: list[str]) -> dict[str, d
     if inventory is not None and not found and not any(message.startswith("role-inventory") for message in blocking):
         blocking.append("角色清单为空")
     return found
-
-
-def _clusters(inventory: dict[str, Any] | None, roles: dict[str, dict[str, str]], blocking: list[str]) -> list[dict[str, Any]]:
-    if inventory is None:
-        return []
-    clusters: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    covered: set[str] = set()
-    for item in _list(inventory.get("clusters"), "role-inventory.json clusters", blocking):
-        if not isinstance(item, dict):
-            blocking.append("角色簇必须是对象")
-            continue
-        _only(item, {"id", "evidence", "role_ids"}, "角色簇", blocking)
-        cluster_id = _ident(item.get("id"), "角色簇 id", blocking)
-        evidence = _evidence(item.get("evidence"), f"角色簇 {cluster_id or '?'}", blocking)
-        role_ids = []
-        raw_ids = item.get("role_ids")
-        if not isinstance(raw_ids, list) or not raw_ids:
-            blocking.append(f"角色簇 {cluster_id or '?'} 没有角色")
-        else:
-            for role_id in raw_ids:
-                ident = _ident(role_id, "角色簇引用", blocking)
-                if not ident:
-                    continue
-                if ident not in roles:
-                    blocking.append(f"角色簇 {cluster_id or '?'} 引用了未知角色 {ident}")
-                    continue
-                role_ids.append(ident)
-                covered.add(ident)
-        if not cluster_id or evidence is None:
-            continue
-        if cluster_id in seen:
-            blocking.append(f"角色簇 id 重复：{cluster_id}")
-            continue
-        seen.add(cluster_id)
-        clusters.append({"id": cluster_id, "evidence": evidence, "role_ids": role_ids})
-    missing = [role_id for role_id in roles if role_id not in covered]
-    if missing:
-        blocking.append("角色没有进入任何角色簇：" + "、".join(sorted(missing)))
-    if inventory is not None and not clusters and roles:
-        blocking.append("角色清单没有角色簇")
-    return clusters
 
 
 def _dispositions(
@@ -511,280 +462,6 @@ def _manifest_matches(raw: dict[str, Any] | None, projection: dict[str, Any], bl
         blocking.append("receipt-manifest.json 的威胁路径与决策投影不一致")
 
 
-def _close_clusters(
-    source_dir: Path,
-    clusters: list[dict[str, Any]],
-    roles: dict[str, dict[str, str]],
-    review: list[dict[str, str]],
-    blocking: list[str],
-) -> list[dict[str, Any]]:
-    closures: list[dict[str, Any]] = []
-    try:
-        root = source_dir.resolve()
-    except OSError:
-        blocking.append("导入源码目录不可用")
-        return closures
-    if not root.is_dir():
-        blocking.append("导入源码目录不存在")
-        return closures
-    for cluster in clusters:
-        evidence = cluster["evidence"]
-        claimed = {roles[role_id]["literal"] for role_id in cluster["role_ids"] if role_id in roles}
-        if evidence["kind"] != "source":
-            _note_evidence(evidence, f"角色簇 {cluster['id']} 的资料需要人工确认", review)
-            closures.append({"id": cluster["id"], "status": evidence["kind"], "roles": sorted(claimed), "opaque": []})
-            continue
-        observed = _observe_cluster(root, cluster, claimed, review, blocking)
-        closures.append(observed)
-    return closures
-
-
-def _observe_cluster(
-    root: Path,
-    cluster: dict[str, Any],
-    claimed: set[str],
-    review: list[dict[str, str]],
-    blocking: list[str],
-) -> dict[str, Any]:
-    evidence = cluster["evidence"]
-    empty = {"id": cluster["id"], "status": "unparsed", "roles": sorted(claimed), "opaque": []}
-    file_path = _source_file(root, evidence["path"], blocking, cluster["id"])
-    if file_path is None:
-        return empty
-    try:
-        if file_path.stat().st_size > 1_000_000:
-            review.append({"code": "unparsed", "message": f"角色簇 {cluster['id']} 的引用文件过大，需人工确认"})
-            return empty
-        text = file_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        blocking.append(f"角色簇 {cluster['id']} 的引用文件无法读取")
-        return empty
-    if evidence["literal"] not in text:
-        blocking.append(f"角色簇 {cluster['id']} 的锚点 {evidence['literal']} 没有出现在引用文件中")
-        return empty
-    if evidence["literal"] not in claimed:
-        blocking.append(f"角色簇 {cluster['id']} 的锚点必须是该簇中的角色字面量")
-        return empty
-    if file_path.suffix.lower() == ".go":
-        containers = _go_const_groups(text)
-    else:
-        containers = _containers(text)
-    if containers is None:
-        review.append({"code": "unparsed", "message": f"角色簇 {cluster['id']} 未能可靠解析同级角色，需人工确认"})
-        return empty
-    status, missing, invented, opaque = _match_container(containers, claimed, evidence["literal"])
-    observed = {"id": cluster["id"], "status": status, "roles": sorted(claimed), "opaque": sorted(opaque)}
-    if status == "unparsed":
-        review.append({"code": "unparsed", "message": f"角色簇 {cluster['id']} 未能可靠解析同级角色，需人工确认"})
-    elif status == "opaque":
-        review.append({"code": "unparsed", "message": f"角色簇 {cluster['id']} 含有无法表示为角色标识的同级字面量：" + "、".join(sorted(opaque)) + "，需人工确认"})
-    elif status == "missing":
-        message = f"角色簇 {cluster['id']} 还缺同级角色：" + "、".join(sorted(missing))
-        if opaque:
-            message += "；另有无法入清单的字面量：" + "、".join(sorted(opaque))
-        review.append({"code": "cluster_inference", "message": message + "；自动推断不一定准确，需人工确认"})
-    elif status == "invented":
-        review.append({"code": "cluster_inference", "message": f"角色簇 {cluster['id']} 的自动推断未识别：" + "、".join(sorted(invented)) + "；需人工确认"})
-    elif status == "both":
-        review.append({"code": "cluster_inference", "message": f"角色簇 {cluster['id']} 的自动推断与清单不一致，可能遗漏：" + "、".join(sorted(missing)) + "；未识别：" + "、".join(sorted(invented)) + "；需人工确认"})
-    return observed
-
-
-def _match_container(containers: list["_SiblingGroup"], claimed: set[str], anchor: str) -> tuple[str, set[str], set[str], set[str]]:
-    relevant = [item for item in containers if anchor in item.roles or anchor in item.opaque]
-    if not relevant:
-        return "unparsed", set(), set(), set()
-    if any(item.roles == claimed and not item.opaque for item in relevant):
-        return "closed", set(), set(), set()
-    best = min(relevant, key=lambda item: (len(item.roles.symmetric_difference(claimed)), len(item.roles), len(item.opaque)))
-    if len(best.roles) + len(best.opaque) > _MAX_CLUSTER_TOKENS:
-        return "unparsed", set(), set(), set(best.opaque)
-    if best.roles == claimed and best.opaque:
-        return "opaque", set(), set(), set(best.opaque)
-    missing = best.roles - claimed
-    invented = claimed - best.roles
-    if missing and invented:
-        return "both", missing, invented, set(best.opaque)
-    if missing:
-        return "missing", missing, set(), set(best.opaque)
-    if invented:
-        return "invented", set(), invented, set(best.opaque)
-    return "unparsed", set(), set(), set(best.opaque)
-
-
-def _source_file(root: Path, relative: str, blocking: list[str], cluster_id: str) -> Path | None:
-    candidate = Path(relative)
-    if not relative or candidate.is_absolute() or ".." in candidate.parts:
-        blocking.append(f"角色簇 {cluster_id} 引用的文件不在导入源码内")
-        return None
-    try:
-        target = (root / candidate).resolve()
-        target.relative_to(root)
-    except (OSError, ValueError):
-        blocking.append(f"角色簇 {cluster_id} 引用的文件不在导入源码内")
-        return None
-    if not target.is_file():
-        blocking.append(f"角色簇 {cluster_id} 引用的文件不存在")
-        return None
-    return target
-
-
-class _SiblingGroup:
-    def __init__(self) -> None:
-        self.roles: set[str] = set()
-        self.opaque: set[str] = set()
-
-    def add(self, token: str) -> None:
-        text = token.strip()
-        if not text:
-            return
-        if _role_token(text):
-            self.roles.add(text)
-        else:
-            self.opaque.add(text)
-
-
-def _go_const_groups(text: str) -> list[_SiblingGroup] | None:
-    """Extract declarations, never function arguments or switch case labels."""
-    try:
-        from tree_sitter import Language, Parser
-        import tree_sitter_go
-        source = text.encode("utf-8")
-        root = Parser(Language(tree_sitter_go.language())).parse(source).root_node
-    except (ImportError, TypeError, ValueError):
-        return None
-    if root.has_error:
-        return None
-    groups: list[_SiblingGroup] = []
-    pending = [root]
-    while pending:
-        node = pending.pop()
-        if node.type == "const_declaration":
-            group = _SiblingGroup()
-            for spec in node.named_children:
-                if spec.type == "const_spec":
-                    for name in spec.children_by_field_name("name"):
-                        group.add(source[name.start_byte:name.end_byte].decode("utf-8"))
-            if group.roles:
-                groups.append(group)
-        else:
-            pending.extend(node.named_children)
-    return groups
-
-
-def _containers(text: str) -> list[_SiblingGroup] | None:
-    containers: list[_SiblingGroup] = []
-    stack: list[dict[str, Any]] = []
-    index = 0
-    length = len(text)
-
-    def skip_comment(start: int) -> int:
-        if text.startswith("//", start) or text.startswith("#", start):
-            newline = text.find("\n", start)
-            return length if newline < 0 else newline + 1
-        if text.startswith("/*", start):
-            end = text.find("*/", start + 2)
-            return length if end < 0 else end + 2
-        return start
-
-    while index < length:
-        char = text[index]
-        if char in " \t\r\n":
-            index += 1
-            continue
-        comment = skip_comment(index)
-        if comment != index:
-            index = comment
-            continue
-        if char in "\"'`":
-            token, index = _read_string(text, index)
-            if token is None:
-                return None
-            _record(stack, token, text, index, is_string=True)
-            continue
-        if char.isalpha() or char in "_$":
-            end = index + 1
-            while end < length and (text[end].isalnum() or text[end] in "_$"):
-                end += 1
-            _record(stack, text[index:end], text, end, is_string=False)
-            index = end
-            continue
-        if char in "{[":
-            stack.append({"kind": char, "group": _SiblingGroup()})
-            index += 1
-            continue
-        if char in "}]":
-            if not stack or (char == "}" and stack[-1]["kind"] != "{") or (char == "]" and stack[-1]["kind"] != "["):
-                return None
-            finished = stack.pop()
-            group = finished["group"]
-            if group.roles or group.opaque:
-                containers.append(group)
-            index += 1
-            continue
-        index += 1
-    if stack:
-        return None
-    return containers
-
-
-def _record(stack: list[dict[str, Any]], token: str, text: str, index: int, *, is_string: bool) -> None:
-    if not stack or not token.strip():
-        return
-    parent = stack[-1]
-    if parent["kind"] == "[":
-        parent["group"].add(token)
-        return
-    if index < len(text) and text[index] == "?":
-        parent["group"].add(token)
-        return
-    cursor = index
-    length = len(text)
-    while cursor < length:
-        if text[cursor] in " \t\r\n":
-            cursor += 1
-            continue
-        if text.startswith("//", cursor) or text.startswith("#", cursor):
-            newline = text.find("\n", cursor)
-            cursor = length if newline < 0 else newline + 1
-            continue
-        if text.startswith("/*", cursor):
-            end = text.find("*/", cursor + 2)
-            cursor = length if end < 0 else end + 2
-            continue
-        break
-    if cursor < length and text[cursor] in ({":", ",", "}", ")"} if is_string else {":", ",", "}"}):
-        parent["group"].add(token)
-
-
-def _read_string(text: str, start: int) -> tuple[str | None, int]:
-    quote = text[start]
-    if text.startswith(quote * 3, start):
-        end = text.find(quote * 3, start + 3)
-        if end < 0:
-            return None, len(text)
-        return text[start + 3:end], end + 3
-    chars: list[str] = []
-    index = start + 1
-    while index < len(text):
-        char = text[index]
-        if char == "\\":
-            if index + 1 >= len(text):
-                return None, len(text)
-            chars.append(text[index + 1])
-            index += 2
-            continue
-        if char == quote:
-            return "".join(chars), index + 1
-        chars.append(char)
-        index += 1
-    return None, len(text)
-
-
-def _role_token(value: str) -> bool:
-    return bool(_TOKEN.fullmatch(value)) and len(value) <= 80
-
-
 def _note_evidence(evidence: dict[str, str], message: str, review: list[dict[str, str]]) -> None:
     if evidence["kind"] in _REVIEW_KINDS:
         review.append({"code": evidence["kind"], "message": message})
@@ -860,7 +537,7 @@ def _ident(raw: Any, label: str, blocking: list[str]) -> str:
 
 
 def _token(raw: Any, label: str, blocking: list[str]) -> str:
-    if not isinstance(raw, str) or not _role_token(raw):
+    if not isinstance(raw, str) or len(raw) > 80 or not _TOKEN.fullmatch(raw):
         if label:
             blocking.append(f"{label} 不是角色字面量")
         return ""

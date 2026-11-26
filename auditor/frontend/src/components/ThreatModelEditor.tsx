@@ -52,7 +52,6 @@ export default function ThreatModelEditor({ project, onUpdate }: { project: Proj
       <label className="grid gap-1">证据字面量<Input value={draft.evidence.literal} onChange={(event) => setDraft({ ...draft, evidence: { ...draft.evidence, literal: event.target.value } })} /></label>
       <div><Button disabled={busy} onClick={() => void save()}>{busy ? '保存中…' : '保存并重新检查'}</Button></div>
     </> : null}
-    <p className="text-muted-foreground">角色簇中无法识别的字面量请结合源码核实；确认它们无需作为角色后，可使用下方的人工确认按钮。</p>
     {message ? <p role="status" className="break-words">{message}</p> : null}
   </section>
 }

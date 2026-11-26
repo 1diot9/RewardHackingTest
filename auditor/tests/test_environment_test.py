@@ -116,8 +116,8 @@ class EnvironmentTestCases(unittest.IsolatedAsyncioTestCase):
 
     def test_repair_feedback_names_role_closure_failures(self):
         prompt = runner._environment_repair_prompt([
-            {'id': 'threat_coverage', 'ok': False, 'message': '角色簇 base-roles 还缺同级角色：commenter'},
-        ], '角色簇 base-roles 还缺同级角色：commenter')
+            {'id': 'threat_coverage', 'ok': False, 'message': '角色 commenter 缺少处置'},
+        ], '角色 commenter 缺少处置')
         self.assertIn('威胁模型格式或引用错误', prompt)
         self.assertIn('commenter', prompt)
         self.assertIn('不要依据自动猜测虚构角色', prompt)

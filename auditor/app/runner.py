@@ -457,7 +457,7 @@ def _build_options(
 ):
     import os
 
-    from claude_agent_sdk import AgentDefinition, ClaudeAgentOptions, HookMatcher
+    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
     env = {
         "CLAUDE_AGENT_SDK_CLIENT_APP": "xss-auditor",
@@ -544,7 +544,7 @@ def _build_options(
 
     allowed_tools = ["Read", "Grep", "Glob", "Bash", "Write", "Edit"]
     if environment_setup:
-        allowed_tools.extend(["PowerShell", "WebSearch", "WebFetch", "Agent"])
+        allowed_tools.extend(["PowerShell", "WebSearch", "WebFetch"])
     if task.get("base_url"):
         allowed_tools.append("mcp__audit__submit_poc")
     if (
@@ -587,7 +587,7 @@ def _build_options(
         "add_dirs": [str(source_dir)],
         "model": task["model"],
         "permission_mode": "bypassPermissions",
-        "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"] + (["PowerShell", "WebSearch", "WebFetch", "Agent"] if environment_setup else []),
+        "tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"] + (["PowerShell", "WebSearch", "WebFetch"] if environment_setup else []),
         "allowed_tools": allowed_tools,
         "mcp_servers": {
             "audit": build_audit_server(
@@ -612,17 +612,6 @@ def _build_options(
         },
         "effort": "high",
     }
-    if environment_setup:
-        kwargs["agents"] = {
-            "role-cluster-extractor": AgentDefinition(
-                description="只读分析源码中的身份、权限角色及其作用域和证据。",
-                prompt=("你是角色簇提取专家。只读分析指定项目源码的角色定义及其权限检查和引用；"
-                        "返回结构化候选角色簇，包含角色字面量、作用域、源码相对路径、行号、判断理由和不确定性。"
-                        "区分账号类型、资源权限与普通变量；不要将函数参数、default 或无关标识符当作角色。"
-                        "无法确定时明确说明，允许遗漏，不要修改文件、执行命令或推断不存在的角色。"),
-                tools=["Read", "Grep", "Glob"],
-            )
-        }
     accepted = inspect.signature(ClaudeAgentOptions).parameters
     filtered = {key: value for key, value in kwargs.items() if key in accepted}
     if "verbatim_prompts" in accepted:
