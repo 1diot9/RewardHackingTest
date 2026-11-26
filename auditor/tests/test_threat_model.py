@@ -14,43 +14,33 @@ def write_closed_model(
     attacker: str = "a",
     victim: str = "b",
     path_id: str = "a-to-b",
-    scope: str = "demo",
 ) -> dict:
     """Write a two-role model that projects to one manifest path."""
 
     source.mkdir(parents=True, exist_ok=True)
     (source / "roles.js").write_text(f'const roles = ["{attacker}", "{victim}"];\n', encoding="utf-8")
-    evidence = {"kind": "source", "path": "roles.js", "literal": attacker}
-    inventory = {
-        "roles": [
-            {"id": attacker, "literal": attacker, "scope": scope},
-            {"id": victim, "literal": victim, "scope": scope},
-        ],
-    }
     decisions = {
         "roles": [
             {"id": attacker, "disposition": "include", "reason": "可以写入对方可见的内容", "evidence": {"kind": "source", "path": "roles.js", "literal": attacker}},
             {"id": victim, "disposition": "victim_only", "reason": "作为同作用域受害者", "evidence": {"kind": "source", "path": "roles.js", "literal": victim}},
         ],
-        "victims": [{"role_id": victim, "account_id": victim, "scope": scope}],
+        "victims": [{"role_id": victim, "account_id": victim}],
         "paths": [{
             "id": path_id,
             "attacker_role": attacker,
             "victim_role": victim,
             "attacker_account": attacker,
             "victim_account": victim,
-            "scope": scope,
             "primary": True,
             "accept_self_xss": False,
         }],
         "boundaries": [],
     }
     plan = {"accounts": [
-        {"account_id": attacker, "role_id": attacker, "scope": scope, "extra_privileges": []},
-        {"account_id": victim, "role_id": victim, "scope": scope, "extra_privileges": []},
+        {"account_id": attacker, "role_id": attacker, "extra_privileges": []},
+        {"account_id": victim, "role_id": victim, "extra_privileges": []},
     ]}
     environment.mkdir(parents=True, exist_ok=True)
-    (environment / "role-inventory.json").write_text(json.dumps(inventory), encoding="utf-8")
     (environment / "threat-decisions.json").write_text(json.dumps(decisions), encoding="utf-8")
     (environment / "account-plan.json").write_text(json.dumps(plan), encoding="utf-8")
     (environment / "create-accounts.py").write_text('ACCOUNT_PLAN = "account-plan.json"\n', encoding="utf-8")
@@ -90,7 +80,7 @@ class ThreatModelTests(unittest.TestCase):
             self.assertFalse(any(item["code"] == "assumption" for item in report.review_items))
 
             decisions["victims"] = []
-            decisions["boundaries"] = [{"attacker_role": "b", "victim_role": "a", "scope": "demo", "reason": "不适用", "evidence": {"kind": "source", "path": "roles.js", "literal": "b"}}]
+            decisions["boundaries"] = [{"attacker_role": "b", "victim_role": "a", "reason": "不适用", "evidence": {"kind": "source", "path": "roles.js", "literal": "b"}}]
             _write(environment / "threat-decisions.json", decisions)
             report = evaluate_threat_model(environment, source)
             self.assertTrue(any("无边界说明" in message and "排除" in message for message in report.messages), report.messages)
@@ -103,9 +93,6 @@ class ThreatModelTests(unittest.TestCase):
             manifest = write_closed_model(environment, source)
             _write(environment / "receipt-manifest.json", manifest)
             (source / "roles.js").write_text('const roles = ["a", "b", "c"];\n', encoding="utf-8")
-            inventory = json.loads((environment / "role-inventory.json").read_text(encoding="utf-8"))
-            inventory["roles"].append({"id": "c", "literal": "c", "scope": "demo"})
-            _write(environment / "role-inventory.json", inventory)
             decisions = json.loads((environment / "threat-decisions.json").read_text(encoding="utf-8"))
             decisions["roles"].append({"id": "c", "disposition": "exclude", "reason": "不参与", "evidence": {"kind": "assumption", "path": "", "literal": "不参与"}})
             _write(environment / "threat-decisions.json", decisions)
@@ -125,21 +112,27 @@ class ThreatModelTests(unittest.TestCase):
             self.assertEqual(report.coverage_status, "closed")
             self.assertEqual(report.review_items, [])
             self.assertTrue(report.digest)
+            self.assertFalse((environment / "role-inventory.json").exists())
 
-    def test_legacy_inventory_data_does_not_affect_model_or_digest(self) -> None:
+    def test_legacy_scopes_cannot_hide_uncovered_roles(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             environment = root / "environment"
             manifest = write_closed_model(environment, root / "source")
             _write(environment / "receipt-manifest.json", manifest)
-            current = evaluate_threat_model(environment, root / "source")
-            inventory = json.loads((environment / "role-inventory.json").read_text(encoding="utf-8"))
-            inventory["clusters"] = [{"invalid": "legacy data"}]
-            _write(environment / "role-inventory.json", inventory)
-            legacy = evaluate_threat_model(environment, root / "source")
-            self.assertTrue(legacy.ok, legacy.messages)
-            self.assertEqual(current.digest, legacy.digest)
-            self.assertEqual(current.review_items, legacy.review_items)
+            decisions = json.loads((environment / "threat-decisions.json").read_text(encoding="utf-8"))
+            decisions["roles"].append({"id": "c", "disposition": "victim_only", "reason": "其他租户", "evidence": {"kind": "source", "path": "roles.js", "literal": "c"}})
+            decisions["victims"][0]["scope"] = "tenant-a"
+            decisions["victims"].append({"role_id": "c", "account_id": "c", "scope": "tenant-b"})
+            decisions["paths"][0]["scope"] = "tenant-a"
+            _write(environment / "threat-decisions.json", decisions)
+            report = evaluate_threat_model(environment, root / "source")
+            self.assertFalse(report.ok)
+            self.assertTrue(any("a → c" in message for message in report.messages), report.messages)
+            decisions["boundaries"].append({"attacker_role": "a", "victim_role": "c", "reason": "租户隔离", "evidence": {"kind": "source", "path": "roles.js", "literal": "c"}})
+            _write(environment / "threat-decisions.json", decisions)
+            report = evaluate_threat_model(environment, root / "source")
+            self.assertTrue(report.ok, report.messages)
 
     def test_assumption_remains_reviewable(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -185,25 +178,21 @@ class ThreatModelTests(unittest.TestCase):
             })
             manifest["extension_path_budget"] = 0
             _write(environment / "receipt-manifest.json", manifest)
-            inventory = json.loads((environment / "role-inventory.json").read_text(encoding="utf-8"))
             (root / "source" / "roles.js").write_text('const roles = ["a", "b", "c"];\n', encoding="utf-8")
-            inventory["roles"].append({"id": "c", "literal": "c", "scope": "demo"})
-            decisions["victims"].append({"role_id": "c", "account_id": "c", "scope": "demo"})
+            decisions["victims"].append({"role_id": "c", "account_id": "c"})
             decisions["paths"].append({
                 "id": "c-to-b",
                 "attacker_role": "c",
                 "victim_role": "b",
                 "attacker_account": "c",
                 "victim_account": "b",
-                "scope": "demo",
                 "primary": False,
                 "accept_self_xss": False,
             })
             decisions["boundaries"] = []
-            _write(environment / "role-inventory.json", inventory)
             _write(environment / "threat-decisions.json", decisions)
             plan = json.loads((environment / "account-plan.json").read_text(encoding="utf-8"))
-            plan["accounts"].append({"account_id": "c", "role_id": "c", "scope": "demo", "extra_privileges": []})
+            plan["accounts"].append({"account_id": "c", "role_id": "c", "extra_privileges": []})
             _write(environment / "account-plan.json", plan)
             under_budget = evaluate_threat_model(environment, root / "source")
             self.assertFalse(any("extension_path_budget" in message for message in under_budget.messages), under_budget.messages)
@@ -214,8 +203,6 @@ class ThreatModelTests(unittest.TestCase):
             environment = root / "environment"
             manifest = write_closed_model(environment, root / "source")
             (root / "source" / "roles.js").write_text('const roles = ["a", "b", "c"];\n', encoding="utf-8")
-            inventory = json.loads((environment / "role-inventory.json").read_text(encoding="utf-8"))
-            inventory["roles"].append({"id": "c", "literal": "c", "scope": "demo"})
             decisions = json.loads((environment / "threat-decisions.json").read_text(encoding="utf-8"))
             decisions["roles"].append({
                 "id": "c",
@@ -223,8 +210,7 @@ class ThreatModelTests(unittest.TestCase):
                 "reason": "另一名同作用域用户",
                 "evidence": {"kind": "source", "path": "roles.js", "literal": "c"},
             })
-            decisions["victims"].append({"role_id": "c", "account_id": "c", "scope": "demo"})
-            _write(environment / "role-inventory.json", inventory)
+            decisions["victims"].append({"role_id": "c", "account_id": "c"})
             _write(environment / "threat-decisions.json", decisions)
             _write(environment / "receipt-manifest.json", manifest)
             open_cell = evaluate_threat_model(environment, root / "source")
@@ -233,7 +219,6 @@ class ThreatModelTests(unittest.TestCase):
             decisions["boundaries"] = [{
                 "attacker_role": "a",
                 "victim_role": "c",
-                "scope": "demo",
                 "reason": "该受害者看不到 a 写入的资源",
                 "evidence": {"kind": "source", "path": "roles.js", "literal": "c"},
             }]
@@ -268,7 +253,6 @@ class ThreatModelTests(unittest.TestCase):
             decisions["boundaries"] = [{
                 "attacker_role": "a",
                 "victim_role": "b",
-                "scope": "demo",
                 "reason": "另一条资料来源",
                 "evidence": {"kind": "source", "path": "roles.js", "literal": "b"},
             }]

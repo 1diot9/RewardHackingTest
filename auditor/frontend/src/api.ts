@@ -130,7 +130,7 @@ export type ReceiptSettings = {
 
 export type ThreatReview = { code: string; message: string }
 export type Project = { id: string; name: string; source_dir: string; github_url?: string; created_at: string; initialization?: { status: string; environment_status: string; error?: string | null; workspace: string; github_updated?: boolean; github_change_counts?: { added: number; modified: number; deleted: number }; checks?: { id: string; ok: boolean; message: string }[]; coverage_status?: string; threat_model_digest?: string; threat_model_review?: ThreatReview[]; threat_model_ack?: { digest: string; acknowledged_at: string; coverage_status?: string } } }
-export type ThreatRole = { id: string; literal: string; disposition: string; reason: string; evidence: { kind: string; path: string; literal: string } }
+export type ThreatRole = { id: string; disposition: string; reason: string; evidence: { kind: string; path: string; literal: string } }
 export type EnvironmentCheck = { ready: boolean; checks: { id: string; ok: boolean; message: string }[]; workspace: string; notice: string }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {

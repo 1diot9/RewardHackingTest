@@ -57,14 +57,13 @@ def evaluate_threat_model(environment: Path, source_dir: Path | None) -> ThreatM
 
     blocking: list[str] = []
     review: list[dict[str, str]] = []
-    inventory = _load_object(environment / "role-inventory.json", "角色清单 role-inventory.json", blocking)
     decisions = _load_object(environment / "threat-decisions.json", "威胁决策 threat-decisions.json", blocking)
     accounts = _load_object(environment / "account-plan.json", "账号计划 account-plan.json", blocking)
     manifest_raw = _load_object(environment / "receipt-manifest.json", "receipt-manifest.json", blocking)
     if blocking:
         return _report(False, "incomplete", blocking, review, "")
 
-    roles = _roles(inventory, blocking)
+    roles = _roles(decisions, blocking)
     dispositions = _dispositions(decisions, roles, blocking, review)
     victims = _victims(decisions, roles, dispositions, blocking)
     paths = _paths(decisions, roles, dispositions, victims, blocking)
@@ -108,26 +107,21 @@ def _load_object(path: Path, label: str, blocking: list[str]) -> dict[str, Any] 
     return raw
 
 
-def _roles(inventory: dict[str, Any] | None, blocking: list[str]) -> dict[str, dict[str, str]]:
-    if inventory is None:
+def _roles(decisions: dict[str, Any] | None, blocking: list[str]) -> dict[str, dict[str, str]]:
+    if decisions is None:
         return {}
-    _only(inventory, {"roles", "clusters"}, "role-inventory.json", blocking)
     found: dict[str, dict[str, str]] = {}
-    for item in _list(inventory.get("roles"), "role-inventory.json roles", blocking):
+    for item in _list(decisions.get("roles"), "threat-decisions.json roles", blocking):
         if not isinstance(item, dict):
-            blocking.append("role-inventory.json roles 项必须是对象")
             continue
-        _only(item, {"id", "literal", "scope"}, "角色", blocking)
         role_id = _ident(item.get("id"), "角色 id", blocking)
-        literal = _token(item.get("literal"), "角色字面量", blocking)
-        scope = _scope(item.get("scope"), "角色作用域", blocking)
-        if not role_id or not literal or not scope:
+        if not role_id:
             continue
         if role_id in found:
             blocking.append(f"角色 id 重复：{role_id}")
             continue
-        found[role_id] = {"id": role_id, "literal": literal, "scope": scope}
-    if inventory is not None and not found and not any(message.startswith("role-inventory") for message in blocking):
+        found[role_id] = {"id": role_id}
+    if not found:
         blocking.append("角色清单为空")
     return found
 
@@ -177,7 +171,7 @@ def _victims(decisions: dict[str, Any] | None, roles: dict[str, dict[str, str]],
     if decisions is None:
         return []
     victims = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     for item in _list(decisions.get("victims"), "threat-decisions.json victims", blocking):
         if not isinstance(item, dict):
             blocking.append("候选受害者必须是对象")
@@ -185,8 +179,7 @@ def _victims(decisions: dict[str, Any] | None, roles: dict[str, dict[str, str]],
         _only(item, {"role_id", "account_id", "scope"}, "候选受害者", blocking)
         role_id = _ident(item.get("role_id"), "受害者角色", blocking)
         account_id = _ident(item.get("account_id"), "受害者账号", blocking)
-        scope = _scope(item.get("scope"), "受害者作用域", blocking)
-        if not role_id or not account_id or not scope:
+        if not role_id or not account_id:
             continue
         if role_id not in roles:
             blocking.append(f"候选受害者引用了未知角色 {role_id}")
@@ -194,15 +187,11 @@ def _victims(decisions: dict[str, Any] | None, roles: dict[str, dict[str, str]],
         if dispositions.get(role_id, {}).get("disposition") == "exclude":
             blocking.append(f"已排除的角色 {role_id} 不能作为候选受害者")
             continue
-        if roles[role_id]["scope"] != scope:
-            blocking.append(f"候选受害者 {role_id} 的作用域与角色清单不一致")
-            continue
-        key = (role_id, scope)
-        if key in seen:
+        if role_id in seen:
             blocking.append(f"候选受害者重复：{role_id}")
             continue
-        seen.add(key)
-        victims.append({"role_id": role_id, "account_id": account_id, "scope": scope})
+        seen.add(role_id)
+        victims.append({"role_id": role_id, "account_id": account_id})
     return victims
 
 
@@ -215,7 +204,7 @@ def _paths(
 ) -> list[dict[str, Any]]:
     if decisions is None:
         return []
-    victim_keys = {(item["role_id"], item["scope"]) for item in victims}
+    victim_keys = {item["role_id"] for item in victims}
     paths = []
     seen: set[str] = set()
     for item in _list(decisions.get("paths"), "threat-decisions.json paths", blocking):
@@ -228,10 +217,9 @@ def _paths(
         victim = _ident(item.get("victim_role"), "路径受害者", blocking)
         attacker_account = _ident(item.get("attacker_account"), "路径攻击者账号", blocking)
         victim_account = _ident(item.get("victim_account"), "路径受害者账号", blocking)
-        scope = _scope(item.get("scope"), "路径作用域", blocking)
         primary = item.get("primary")
         self_xss = item.get("accept_self_xss")
-        if not path_id or not attacker or not victim or not attacker_account or not victim_account or not scope:
+        if not path_id or not attacker or not victim or not attacker_account or not victim_account:
             continue
         if path_id in seen:
             blocking.append(f"路径 id 重复：{path_id}")
@@ -243,13 +231,10 @@ def _paths(
         if attacker not in roles or victim not in roles:
             blocking.append(f"路径 {path_id} 引用了未知角色")
             continue
-        if roles[attacker]["scope"] != scope or roles[victim]["scope"] != scope:
-            blocking.append(f"路径 {path_id} 的作用域与角色清单不一致")
-            continue
         disposition = dispositions.get(attacker, {}).get("disposition")
         if disposition != "include":
             blocking.append(f"路径 {path_id} 的攻击者 {attacker} 未被纳入")
-        if (victim, scope) not in victim_keys:
+        if victim not in victim_keys:
             blocking.append(f"路径 {path_id} 的受害者不在候选列表中")
         same_account = attacker_account == victim_account
         if same_account and not self_xss:
@@ -262,7 +247,6 @@ def _paths(
             "victim_role": victim,
             "attacker_account": attacker_account,
             "victim_account": victim_account,
-            "scope": scope,
             "primary": primary,
             "accept_self_xss": self_xss,
         })
@@ -288,9 +272,9 @@ def _boundaries(
 ) -> list[dict[str, Any]]:
     if decisions is None:
         return []
-    victim_keys = {(item["role_id"], item["scope"]) for item in victims}
+    victim_keys = {item["role_id"] for item in victims}
     found: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str]] = set()
     for item in _list(decisions.get("boundaries"), "threat-decisions.json boundaries", blocking):
         if not isinstance(item, dict):
             blocking.append("边界说明必须是对象")
@@ -298,23 +282,22 @@ def _boundaries(
         _only(item, {"attacker_role", "victim_role", "scope", "reason", "evidence"}, "边界说明", blocking)
         attacker = _ident(item.get("attacker_role"), "边界攻击者", blocking)
         victim = _ident(item.get("victim_role"), "边界受害者", blocking)
-        scope = _scope(item.get("scope"), "边界作用域", blocking)
         reason = _reason(item.get("reason"), "无边界理由", blocking)
         evidence = _evidence(item.get("evidence"), "无边界说明", blocking)
-        if not attacker or not victim or not scope or evidence is None or not reason:
+        if not attacker or not victim or evidence is None or not reason:
             continue
         if any(dispositions.get(role, {}).get("disposition") == "exclude" for role in (attacker, victim)):
             blocking.append(f"无边界说明 {attacker} → {victim} 包含已排除角色")
             continue
-        if attacker not in roles or victim not in roles or (victim, scope) not in victim_keys:
+        if attacker not in roles or victim not in roles or victim not in victim_keys:
             blocking.append(f"无边界说明 {attacker} → {victim} 引用了未知角色或受害者")
             continue
-        key = (attacker, victim, scope)
+        key = (attacker, victim)
         if key in seen:
             blocking.append(f"无边界说明重复：{attacker} → {victim}")
             continue
         seen.add(key)
-        found.append({"attacker_role": attacker, "victim_role": victim, "scope": scope, "reason": reason, "evidence": evidence})
+        found.append({"attacker_role": attacker, "victim_role": victim, "reason": reason, "evidence": evidence})
         _note_evidence(evidence, f"{attacker} → {victim} 的无边界依据需要人工确认", review)
     return found
 
@@ -331,9 +314,8 @@ def _account_plan(accounts: dict[str, Any] | None, blocking: list[str]) -> dict[
         _only(item, {"account_id", "role_id", "scope", "extra_privileges", "extra_privilege_reason"}, "账号计划", blocking)
         account_id = _ident(item.get("account_id"), "账号 id", blocking)
         role_id = _ident(item.get("role_id"), "账号角色", blocking)
-        scope = _scope(item.get("scope"), "账号作用域", blocking)
         extras = item.get("extra_privileges")
-        if not account_id or not role_id or not scope:
+        if not account_id or not role_id:
             continue
         if not isinstance(extras, list) or any(not isinstance(value, str) or not _token(value, "", []) for value in extras):
             blocking.append(f"账号 {account_id} 的 extra_privileges 必须是角色字面量数组")
@@ -348,7 +330,7 @@ def _account_plan(accounts: dict[str, Any] | None, blocking: list[str]) -> dict[
         if account_id in found:
             blocking.append(f"账号 id 重复：{account_id}")
             continue
-        found[account_id] = {"account_id": account_id, "role_id": role_id, "scope": scope, "extra_privileges": list(extras)}
+        found[account_id] = {"account_id": account_id, "role_id": role_id, "extra_privileges": list(extras)}
     return found
 
 
@@ -360,41 +342,40 @@ def _matrix(
     boundaries: list[dict[str, Any]],
     blocking: list[str],
 ) -> None:
-    covered = {(path["attacker_role"], path["victim_role"], path["scope"]) for path in paths}
-    recorded = {(item["attacker_role"], item["victim_role"], item["scope"]) for item in boundaries}
+    covered = {(path["attacker_role"], path["victim_role"]) for path in paths}
+    recorded = {(item["attacker_role"], item["victim_role"]) for item in boundaries}
     for role_id, item in dispositions.items():
         if item["disposition"] != "include":
             continue
-        scope = roles[role_id]["scope"]
-        candidates = [victim for victim in victims if victim["scope"] == scope and victim["role_id"] != role_id]
+        candidates = [victim for victim in victims if victim["role_id"] != role_id]
         if not candidates:
-            blocking.append(f"已纳入的攻击者 {role_id} 没有同作用域候选受害者")
+            blocking.append(f"已纳入的攻击者 {role_id} 没有其他候选受害者")
             continue
         for victim in candidates:
-            key = (role_id, victim["role_id"], scope)
+            key = (role_id, victim["role_id"])
             if key not in covered and key not in recorded:
-                blocking.append(f"格子 {role_id} → {victim['role_id']}（{scope}）既没有路径也没有无边界说明")
+                blocking.append(f"格子 {role_id} → {victim['role_id']} 既没有路径也没有无边界说明")
 
 
 def _accounts_align(paths: list[dict[str, Any]], plan: dict[str, dict[str, Any]], blocking: list[str]) -> None:
-    expected: dict[str, tuple[str, str]] = {}
+    expected: dict[str, str] = {}
     for path in paths:
         pairs = (
-            (path["attacker_account"], path["attacker_role"], path["scope"]),
-            (path["victim_account"], path["victim_role"], path["scope"]),
+            (path["attacker_account"], path["attacker_role"]),
+            (path["victim_account"], path["victim_role"]),
         )
-        for account_id, role_id, scope in pairs:
+        for account_id, role_id in pairs:
             previous = expected.get(account_id)
-            if previous is not None and previous != (role_id, scope):
+            if previous is not None and previous != role_id:
                 blocking.append(f"账号 {account_id} 在不同路径中角色不一致")
                 continue
-            expected[account_id] = (role_id, scope)
+            expected[account_id] = role_id
             account = plan.get(account_id)
             if account is None:
                 blocking.append(f"账号计划缺少 {account_id}")
                 continue
-            if account["role_id"] != role_id or account["scope"] != scope:
-                blocking.append(f"账号 {account_id} 的角色或作用域与路径不一致")
+            if account["role_id"] != role_id:
+                blocking.append(f"账号 {account_id} 的角色与路径不一致")
     extra = sorted(set(plan) - set(expected))
     if extra:
         blocking.append("账号计划包含路径未使用的账号：" + "、".join(extra))
@@ -510,8 +491,8 @@ def _canonical(value: Any) -> Any:
         items = [_canonical(item) for item in value]
         if items and all(isinstance(item, dict) and "id" in item for item in items):
             return sorted(items, key=lambda item: str(item["id"]))
-        if items and all(isinstance(item, dict) and {"attacker_role", "victim_role", "scope"} <= set(item) for item in items):
-            return sorted(items, key=lambda item: (item["attacker_role"], item["victim_role"], item["scope"]))
+        if items and all(isinstance(item, dict) and {"attacker_role", "victim_role"} <= set(item) for item in items):
+            return sorted(items, key=lambda item: (item["attacker_role"], item["victim_role"]))
         return items
     return value
 
@@ -540,13 +521,6 @@ def _token(raw: Any, label: str, blocking: list[str]) -> str:
     if not isinstance(raw, str) or len(raw) > 80 or not _TOKEN.fullmatch(raw):
         if label:
             blocking.append(f"{label} 不是角色字面量")
-        return ""
-    return raw
-
-
-def _scope(raw: Any, label: str, blocking: list[str]) -> str:
-    if not isinstance(raw, str) or not raw or len(raw) > 80 or any(char not in _IDENTIFIER for char in raw):
-        blocking.append(f"{label} 不是有效作用域")
         return ""
     return raw
 

@@ -976,7 +976,7 @@ def _environment_repair_prompt(checks: list[dict], detail: str) -> str:
     if failed_ids & {"receipt_manifest", "receipt_adapter", "receipt_run"}:
         guidance.append("清单或运行信息错误：对照错误和初始化契约检查对应 JSON 的字段、身份引用及实际端口；不要添加未允许的字段。")
     if "threat_coverage" in failed_ids:
-        guidance.append("威胁模型格式或引用错误：核对 role-inventory.json、threat-decisions.json、account-plan.json 和清单的一致性；只根据源码及权限语义记录角色，不要依据自动猜测虚构角色。排除或无边界必须写明理由，不要把假设改写成 source。create-accounts.py 必须读取 account-plan.json。")
+        guidance.append("威胁模型格式或引用错误：核对 threat-decisions.json、account-plan.json 和清单的一致性；只根据源码及权限语义记录角色，不要依据自动猜测虚构角色。排除或无边界必须写明理由，不要把假设改写成 source。create-accounts.py 必须读取 account-plan.json。")
     if failed_ids & {"start_run", "health"}:
         guidance.append("启动或健康检查错误：先读取 Compose 的实际 command、服务监听地址和容器端口，核对源码启动方式、Adapter 和健康检查；出现地址绑定错误时，先逐字核对地址（例如 0.0.0.0 与 0.0.0.1），不要未经证据归因于 Docker 网络或增加权限。")
         guidance.append("健康检查不得要求受保护资源对匿名请求返回 200；认证质询可以是预期结果，应使用公开健康端点或在账号创建后验证受保护资源。不要为通过健康检查关闭官方要求的认证；使用 Basic 时在 Manifest 声明 browser_http_auth 为 basic，浏览器才能应答质询。")

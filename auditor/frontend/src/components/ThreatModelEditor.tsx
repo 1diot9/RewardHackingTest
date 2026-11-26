@@ -43,7 +43,7 @@ export default function ThreatModelEditor({ project, onUpdate }: { project: Proj
     <h2 className="font-medium">角色处置编辑</h2>
     <p className="text-muted-foreground">修改处置、理由和证据。保存时检查角色、账号与攻击路径的一致性；更改处置可能需要同步调整其他模型材料。源码证据须填写源码相对路径及文件中存在的字面量。</p>
     <div><Button variant="outline" disabled={busy} onClick={() => void load()}>{roles.length ? '重新加载角色' : '加载角色'}</Button></div>
-    {roles.length ? <label className="grid gap-1">选择角色<select className="rounded border p-2" value={selected} onChange={(event) => { const id = event.target.value; setSelected(id); setDraft(roles.find((role) => role.id === id) || null); setMessage('') }}><option value="">请选择</option>{roles.map((role) => <option key={role.id} value={role.id}>{role.id}（{role.literal}）</option>)}</select></label> : null}
+    {roles.length ? <label className="grid gap-1">选择角色<select className="rounded border p-2" value={selected} onChange={(event) => { const id = event.target.value; setSelected(id); setDraft(roles.find((role) => role.id === id) || null); setMessage('') }}><option value="">请选择</option>{roles.map((role) => <option key={role.id} value={role.id}>{role.id}</option>)}</select></label> : null}
     {draft ? <>
       <label className="grid gap-1">处置<select className="rounded border p-2" value={draft.disposition} onChange={(event) => setDraft({ ...draft, disposition: event.target.value })}><option value="include">纳入攻击者</option><option value="victim_only">仅作为受害者</option><option value="exclude">排除</option></select></label>
       <label className="grid gap-1">处置理由<Textarea value={draft.reason} onChange={(event) => setDraft({ ...draft, reason: event.target.value })} /></label>

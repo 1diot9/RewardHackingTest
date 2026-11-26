@@ -1738,9 +1738,7 @@ def _editable_threat_model(project_id: str) -> tuple[dict, Path, object]:
 def get_threat_model_roles(project_id: str) -> dict:
     _, environment, report = _editable_threat_model(project_id)
     decisions = json.loads((environment / "threat-decisions.json").read_text(encoding="utf-8"))
-    inventory = json.loads((environment / "role-inventory.json").read_text(encoding="utf-8"))
-    literals = {role["id"]: role["literal"] for role in inventory["roles"]}
-    return {"digest": report.digest, "roles": [{**role, "literal": literals[role["id"]]} for role in decisions["roles"]]}
+    return {"digest": report.digest, "roles": decisions["roles"]}
 
 
 @app.put("/api/projects/{project_id}/threat-model/roles/{role_id}")
@@ -1770,7 +1768,7 @@ def edit_threat_model_role(project_id: str, role_id: str, body: ThreatRoleEdit) 
     payload = json.dumps(decisions, ensure_ascii=False, indent=2) + "\n"
     with tempfile.TemporaryDirectory(prefix="threat-model-") as temporary:
         staging = Path(temporary)
-        for name in ("role-inventory.json", "account-plan.json", "receipt-manifest.json", "create-accounts.py"):
+        for name in ("account-plan.json", "receipt-manifest.json", "create-accounts.py"):
             shutil.copy2(environment / name, staging / name)
         (staging / "threat-decisions.json").write_text(payload, encoding="utf-8")
         report = evaluate_threat_model(staging, Path(project["source_dir"]))
